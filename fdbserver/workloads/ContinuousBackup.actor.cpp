@@ -62,6 +62,9 @@ struct ContinuousBackupWorkload : TestWorkload {
 		backupRanges.push_back_deep(backupRanges.arena(), normalKeys);
 		wait(self->backupAgent.submitBackup(cx, self->backupDir.withPrefix(LiteralStringRef("file://")), 1e8,
 		                                    self->tag.toString(), backupRanges, false));
+		state Reference<IBackupContainer> backupContainer;
+		state UID backupUID;
+		wait(success(self->backupAgent.waitBackup(cx, self->tag.toString(), false, &backupContainer, &backupUID)));
 		return Void();
 	}
 
