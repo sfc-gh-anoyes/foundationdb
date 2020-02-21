@@ -578,6 +578,8 @@ void MultiVersionTransaction::set(const KeyRef& key, const ValueRef& value) {
 	if (key == LiteralStringRef("\xff\xff/cluster_file_path")) {
 		onMainThreadVoid(
 		    [db = this->db, value = Value(value)] {
+			    auto tr = db->dbState->db->createTransaction();
+			    tr->set(LiteralStringRef("\xff\xff/cluster_file_path"), value);
 			    for (const auto& connector : db->dbState->connectionAttempts) {
 				    connector->clusterFilePath = value.toString();
 				    ThreadFuture<Void> onReady;
