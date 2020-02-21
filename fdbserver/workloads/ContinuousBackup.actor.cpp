@@ -33,7 +33,7 @@ struct ContinuousBackupWorkload : TestWorkload {
 	bool abortOnly;
 
 	ContinuousBackupWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		backupDir = getOption(options, LiteralStringRef("backupDir"), LiteralStringRef("simfdb/backup/"));
+		backupDir = getOption(options, LiteralStringRef("backupDir"), LiteralStringRef("file://simfdb/backup/"));
 		tag = getOption(options, LiteralStringRef("tag"), LiteralStringRef("default"));
 		submitOnly = getOption(options, LiteralStringRef("submitOnly"), false);
 		abortOnly = getOption(options, LiteralStringRef("abortOnly"), false);
@@ -60,8 +60,7 @@ struct ContinuousBackupWorkload : TestWorkload {
 	ACTOR static Future<Void> _start(Database cx, ContinuousBackupWorkload* self) {
 		Standalone<VectorRef<KeyRangeRef>> backupRanges;
 		backupRanges.push_back_deep(backupRanges.arena(), normalKeys);
-		wait(self->backupAgent.submitBackup(cx, self->backupDir.withPrefix(LiteralStringRef("file://")), 1e8,
-		                                    self->tag.toString(), backupRanges, false));
+		wait(self->backupAgent.submitBackup(cx, self->backupDir, 1e8, self->tag.toString(), backupRanges, false));
 		state Reference<IBackupContainer> backupContainer;
 		state UID backupUID;
 		wait(success(self->backupAgent.waitBackup(cx, self->tag.toString(), false, &backupContainer, &backupUID)));

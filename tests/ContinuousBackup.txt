@@ -1,6 +1,6 @@
 testTitle=SubmitBackup
     testName=ContinuousBackup
-    backupDir=simfdb/backups/
+    backupDir=file://simfdb/backups/
     simBackupAgents=BackupToFile
     tag=default
     submitOnly=true
