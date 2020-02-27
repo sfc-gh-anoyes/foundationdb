@@ -125,6 +125,7 @@ public:
 
 	//GenericActors
 	double BUGGIFY_FLOW_LOCK_RELEASE_DELAY;
+	int LOW_PRIORITY_DELAY_COUNT;
 
 	//IAsyncFile
 	int64_t INCREMENTAL_DELETE_TRUNCATE_AMOUNT;
@@ -137,6 +138,7 @@ public:
 	double SLOW_LOOP_SAMPLING_RATE;
 	int64_t TSC_YIELD_TIME;
 	int64_t REACTOR_FLAGS;
+	int CERT_FILE_MAX_SIZE;
 
 	//Network
 	int64_t PACKET_LIMIT;
@@ -145,6 +147,8 @@ public:
 	int MAX_PACKET_SEND_BYTES;
 	int MIN_PACKET_BUFFER_BYTES;
 	int MIN_PACKET_BUFFER_FREE_BYTES;
+	int UNRESTRICTED_HANDSHAKE_LIMIT;
+	int BOUNDED_HANDSHAKE_LIMIT;
 
 	//Sim2
 	//FIMXE: more parameters could be factored out

@@ -105,6 +105,7 @@ FlowKnobs::FlowKnobs(bool randomize, bool isSimulated) {
 
 	//GenericActors
 	init( BUGGIFY_FLOW_LOCK_RELEASE_DELAY,                     1.0 );
+	init( LOW_PRIORITY_DELAY_COUNT,                              5 );
 
 	//IAsyncFile
 	init( INCREMENTAL_DELETE_TRUNCATE_AMOUNT,                  5e8 ); //500MB
@@ -116,6 +117,7 @@ FlowKnobs::FlowKnobs(bool randomize, bool isSimulated) {
 	init( SLOW_LOOP_CUTOFF,                          15.0 / 1000.0 );
 	init( SLOW_LOOP_SAMPLING_RATE,                             0.1 );
 	init( TSC_YIELD_TIME,                                  1000000 );
+	init( CERT_FILE_MAX_SIZE,                      5 * 1024 * 1024 );
 
 	//Network
 	init( PACKET_LIMIT,                                  100LL<<20 );
@@ -124,6 +126,8 @@ FlowKnobs::FlowKnobs(bool randomize, bool isSimulated) {
 	init( MAX_PACKET_SEND_BYTES,                        256 * 1024 );
 	init( MIN_PACKET_BUFFER_BYTES,                        4 * 1024 );
 	init( MIN_PACKET_BUFFER_FREE_BYTES,                        256 );
+	init( UNRESTRICTED_HANDSHAKE_LIMIT,                         15 );
+	init( BOUNDED_HANDSHAKE_LIMIT,                             400 );
 
 	//Sim2
 	init( MIN_OPEN_TIME,                                    0.0002 );
