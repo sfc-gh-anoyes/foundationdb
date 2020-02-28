@@ -1879,6 +1879,8 @@ void ReadYourWritesTransaction::setOptionImpl( FDBTransactionOptions::Option opt
 
 			options.disableUsedDuringCommitProtection = true;
 			break;
+		case FDBTransactionOptions::SNOWCANNON_VERIFY_READS:
+			break;
 		default:
 			break;
 	}

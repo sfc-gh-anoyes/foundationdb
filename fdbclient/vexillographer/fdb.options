@@ -239,6 +239,8 @@ description is not currently required but encouraged.
             description="Snapshot read operations will see the results of writes done in the same transaction. This is the default behavior." />
     <Option name="snapshot_ryw_disable" code="601"
             description="Snapshot read operations will not see the results of writes done in the same transaction. This was the default behavior prior to API version 300." />
+    <Option name="snowcannon_verify_reads" code="609"
+            description="Verify checksums of all range reads in this transaction on snowcannon consumers. If the kickstarter has not finished this has no effect."/>
     <Option name="lock_aware" code="700"
             description="The transaction can read and write to locked databases, and is responsible for checking that it took the lock."/>
     <Option name="used_during_commit_protection_disable" code="701"
