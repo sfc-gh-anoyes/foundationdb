@@ -31,12 +31,14 @@ struct ContinuousBackupWorkload : TestWorkload {
 	FileBackupAgent backupAgent;
 	bool submitOnly;
 	bool abortOnly;
+	bool waitBeforeAbort;
 
 	ContinuousBackupWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
 		backupDir = getOption(options, LiteralStringRef("backupDir"), LiteralStringRef("file://simfdb/backup/"));
 		tag = getOption(options, LiteralStringRef("tag"), LiteralStringRef("default"));
 		submitOnly = getOption(options, LiteralStringRef("submitOnly"), false);
 		abortOnly = getOption(options, LiteralStringRef("abortOnly"), false);
+		waitBeforeAbort = getOption(options, LiteralStringRef("waitBeforeAbort"), true);
 	}
 
 	virtual std::string description() { return "ContinuousBackup"; }
@@ -67,7 +69,37 @@ struct ContinuousBackupWorkload : TestWorkload {
 		return Void();
 	}
 
+	ACTOR static Future<Void> waitForBackup(Database cx, ContinuousBackupWorkload* self) {
+		state Version waitUntilVersion;
+		state Transaction tr(cx);
+		loop {
+			tr.setOption(FDBTransactionOptions::READ_LOCK_AWARE);
+			try {
+				Version v = wait(tr.getReadVersion());
+				waitUntilVersion = v;
+				break;
+			} catch (Error& e) {
+				wait(tr.onError(e));
+			}
+		}
+
+		loop {
+			state Reference<IBackupContainer> lastBackupContainer;
+			state UID lastBackupUID;
+			wait(success(
+			    self->backupAgent.waitBackup(cx, self->tag.toString(), false, &lastBackupContainer, &lastBackupUID)));
+			state BackupDescription backupDescription = wait(lastBackupContainer->describeBackup());
+			if (backupDescription.maxRestorableVersion.present() &&
+			    backupDescription.maxRestorableVersion.get() >= waitUntilVersion) {
+				return Void();
+			} else {
+				wait(delay(5.0));
+			}
+		}
+	}
+
 	ACTOR static Future<bool> _check(Database cx, ContinuousBackupWorkload* self) {
+		if (self->waitBeforeAbort) wait(waitForBackup(cx, self));
 		wait(self->backupAgent.abortBackup(cx, self->tag.toString()));
 		return true;
 	}
