@@ -38,6 +38,8 @@ struct ContinuousBackupWorkload : TestWorkload {
 		tag = getOption(options, LiteralStringRef("tag"), LiteralStringRef("default"));
 		submitOnly = getOption(options, LiteralStringRef("submitOnly"), false);
 		abortOnly = getOption(options, LiteralStringRef("abortOnly"), false);
+		// If true, wait until the maximum restorable version reaches the current version
+		// before aborting:
 		waitBeforeAbort = getOption(options, LiteralStringRef("waitBeforeAbort"), true);
 	}
 
