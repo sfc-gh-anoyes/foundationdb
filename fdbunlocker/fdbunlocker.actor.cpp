@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
 				printf("Expecting an argument after %s\n", argv[i]);
 				return 1;
 			}
-			version = std::stoi(std::string(argv[++i]));
+			version = std::stol(std::string(argv[++i]));
 		} else {
 			printf("Unexpected argument: %s\n", argv[i]);
 		}
