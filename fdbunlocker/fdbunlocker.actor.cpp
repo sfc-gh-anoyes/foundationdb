@@ -71,7 +71,7 @@ ACTOR Future<Void> unlockDB(std::string clusterFileName, Optional<Version> versi
 			wait(timeoutError(unlockDatabase(&tr, lockUID.get()), 10.0));
 			wait(timeoutError(tr.commit(), 10.0));
 		}
-		printf("Database unlocked.\n");
+		printf("Database unlocked at version: %ld.\n", tr.getCommittedVersion());
 		g_network->stop();
 		return Void();
 	} catch (Error& e) {
