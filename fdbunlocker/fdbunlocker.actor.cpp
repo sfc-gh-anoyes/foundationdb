@@ -70,8 +70,11 @@ ACTOR Future<Void> unlockDB(std::string clusterFileName, Optional<Version> versi
 			// if database is locked, unlock using current lock UID
 			wait(timeoutError(unlockDatabase(&tr, lockUID.get()), 10.0));
 			wait(timeoutError(tr.commit(), 10.0));
+			printf("Database unlocked at version: %ld.\n", tr.getCommittedVersion());
 		}
-		printf("Database unlocked.\n");
+		else {
+			printf("Database already unlocked.\n");
+		}
 		g_network->stop();
 		return Void();
 	} catch (Error& e) {
