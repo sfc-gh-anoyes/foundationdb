@@ -82,7 +82,7 @@ ACTOR Future<Void> unlockDB(std::string clusterFileName, Optional<Version> versi
 		}
 		else {
 			Version readVersion = wait(tr.getReadVersion());
-			TraceEvent("DatabaseAlreadyLocked").detail("Version", readVersion);
+			TraceEvent("DatabaseAlreadyUnlocked").detail("Version", readVersion);
 			printf("Database already unlocked (version: %ld).\n", readVersion);
 		}
 		g_network->stop();
