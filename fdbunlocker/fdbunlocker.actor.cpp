@@ -16,7 +16,9 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 void printUsage(const char* name) {
-	printf("usage: %s --connfile <CONNFILE> (--lockuid <LOCKUID> | --force) [--version <VERSION]\n", name);
+	printf(
+	    "usage: %s --connfile <CONNFILE> (--lockuid <LOCKUID> | --force) [--version <VERSION] [--log-dir <LOGDIR>]\n",
+	    name);
 }
 
 Database getDatabase(std::string clusterFileName) {
@@ -40,19 +42,23 @@ ACTOR Future<Void> advanceVersion(Database db, Version v) {
 		tr.setOption(FDBTransactionOptions::LOCK_AWARE);
 		try {
 			Version rv = wait(tr.getReadVersion());
+			TraceEvent("AdvancingVersion").detail("From", rv).detail("To", v);
 			if (rv <= v) {
 				tr.set(minRequiredCommitVersionKey, BinaryWriter::toValue(v + 1, Unversioned()));
 				wait(tr.commit()); // this commit will always throw an error, because recovery is forced
 			} else {
+				TraceEvent("VersionLargeEnough").detail("CurrentReadVersion", rv).detail("DesiredVersion", v);
 				return Void();
 			}
 		} catch (Error& e) {
+			TraceEvent("ErrorAdvancingVersion").error(e);
 			wait(tr.onError(e));
 		}
 	}
 }
 
 ACTOR Future<Void> unlockDB(std::string clusterFileName, Optional<Version> version, Optional<UID> lockUID) {
+	TraceEvent::setNetworkThread();
 	try {
 		state Database db = getDatabase(clusterFileName);
 		if (version.present()) {
@@ -68,16 +74,21 @@ ACTOR Future<Void> unlockDB(std::string clusterFileName, Optional<Version> versi
 		}
 		if (lockUID.present()) {
 			// if database is locked, unlock using current lock UID
+			TraceEvent("UnlockingDatabase").detail("LockUID", lockUID.get());
 			wait(timeoutError(unlockDatabase(&tr, lockUID.get()), 10.0));
 			wait(timeoutError(tr.commit(), 10.0));
+			TraceEvent("DatabaseUnlocked").detail("Version", tr.getCommittedVersion());
 			printf("Database unlocked at version: %ld.\n", tr.getCommittedVersion());
 		}
 		else {
-			printf("Database already unlocked.\n");
+			Version readVersion = wait(tr.getReadVersion());
+			TraceEvent("DatabaseAlreadyUnlocked").detail("Version", readVersion);
+			printf("Database already unlocked (version: %ld).\n", readVersion);
 		}
 		g_network->stop();
 		return Void();
 	} catch (Error& e) {
+		TraceEvent("ErrorUnlockingDatabase").error(e);
 		printf("Error occurred while attempting to unlock database: %s (%d).\n", e.what(), e.code());
 		g_network->stop();
 		throw e;
@@ -88,6 +99,7 @@ int main(int argc, char** argv) {
 	Optional<std::string> clusterFileName;
 	Optional<UID> lockUID;
 	Optional<Version> version;
+	Optional<std::string> logDir;
 	bool force = false;
 
 	for (int i = 1; i < argc; ++i) {
@@ -133,13 +145,28 @@ int main(int argc, char** argv) {
 				return 1;
 			}
 			version = std::stol(std::string(argv[++i]));
+		} else if (arg == "--log-dir") {
+			if (logDir.present()) {
+				printUsage(argv[0]);
+				return 1;
+			}
+			if (i + 1 >= argc) {
+				printf("Expecting an argument after %s\n", argv[i]);
+				return 1;
+			}
+			logDir = std::string(argv[++i]);
 		} else {
 			printf("Unexpected argument: %s\n", argv[i]);
+			return 1;
 		}
 	}
 	if (!(force ^ lockUID.present()) || !clusterFileName.present()) {
 		printUsage(argv[0]);
 		return 1;
+	}
+	if (logDir.present()) {
+		setNetworkOption(FDBNetworkOptions::TRACE_ENABLE, StringRef(logDir.get()));
+		setNetworkOption(FDBNetworkOptions::TRACE_FORMAT, "json");
 	}
 
 	try {
