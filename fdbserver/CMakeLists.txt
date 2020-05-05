@@ -128,6 +128,7 @@ set(FDBSERVER_SRCS
   workloads/Inventory.actor.cpp
   workloads/KVStoreTest.actor.cpp
   workloads/KillRegion.actor.cpp
+  workloads/LargeTransactions.actor.cpp
   workloads/LockDatabase.actor.cpp
   workloads/LocalRatekeeper.actor.cpp
   workloads/LogMetrics.actor.cpp
