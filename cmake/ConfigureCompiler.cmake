@@ -9,6 +9,7 @@ env_set(WITH_UNDODB OFF BOOL "Use rr or undodb")
 env_set(USE_ASAN OFF BOOL "Compile with address sanitizer")
 env_set(USE_UBSAN OFF BOOL "Compile with undefined behavior sanitizer")
 env_set(USE_TSAN OFF BOOL "Compile with thread sanitizer")
+env_set(USE_MSAN OFF BOOL "Compile with memory sanitizer")
 env_set(FDB_RELEASE OFF BOOL "This is a building of a final release")
 env_set(USE_CCACHE OFF BOOL "Use ccache for compilation if available")
 env_set(RELATIVE_DEBUG_PATHS OFF BOOL "Use relative file paths in debug info")
@@ -173,6 +174,15 @@ else()
     set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=thread")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=thread")
     set(CMAKE_EXE_LINKER_FLAGS    "${CMAKE_EXE_LINKER_FLAGS}    -fsanitize=thread ${CMAKE_THREAD_LIBS_INIT}")
+  endif()
+
+  if(USE_MSAN)
+    add_compile_options(
+      -fsanitize=memory
+      -DUSE_SANITIZER)
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=memory")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=memory")
+    set(CMAKE_EXE_LINKER_FLAGS    "${CMAKE_EXE_LINKER_FLAGS}    -fsanitize=memory ${CMAKE_THREAD_LIBS_INIT}")
   endif()
 
   if(PORTABLE_BINARY)
