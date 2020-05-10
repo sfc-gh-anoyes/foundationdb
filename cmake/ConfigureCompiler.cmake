@@ -179,6 +179,7 @@ else()
   if(USE_MSAN)
     add_compile_options(
       -fsanitize=memory
+      -fsanitize-memory-track-origins
       -DUSE_SANITIZER)
     set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=memory")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=memory")
