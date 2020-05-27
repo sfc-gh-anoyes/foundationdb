@@ -180,6 +180,8 @@ std::string fromPrintable(const std::string& in) {
 }
 
 ACTOR static void mainActor(std::string clusterFile1, std::string clusterFile2, std::string begin, std::string end) {
+	state FDB::API* fdb = nullptr;
+	state THREAD_HANDLE clientNetThread;
 	try {
 		g_network = newNet2(false);
 		ASSERT(!FDB::API::isAPIVersionSelected());
@@ -192,22 +194,32 @@ ACTOR static void mainActor(std::string clusterFile1, std::string clusterFile2, 
 
 		int apiVersion = 300;
 
-		FDB::API* fdb = FDB::API::selectAPIVersion(apiVersion);
+		fdb = FDB::API::selectAPIVersion(apiVersion);
 		ASSERT(FDB::API::isAPIVersionSelected());
 		ASSERT(fdb->getAPIVersion() == apiVersion);
 		fdb->setupNetwork();
-		startThread(networkThread, fdb);
+		clientNetThread = startThread(networkThread, fdb);
 		TraceEvent::setNetworkThread();
 		selectTraceFormatter("json");
 		openTraceFile(NetworkAddress(), 10 << 20, 10 * 10 << 20);
 		bool result = wait(compareKeyRange(fdb, clusterFile1, clusterFile2, FDB::Key(begin), FDB::Key(end)));
+		fdb->stopNetwork();
+		waitThread(clientNetThread);
 		g_network->stop();
 		flushAndExit(result ? 0 : 1);
 	} catch (Error& e) {
 		fprintf(stderr, "Error: %s\n", e.name());
 		TraceEvent(SevError, "CompareKeyRangeError").error(e);
+		if (fdb) {
+			fdb->stopNetwork();
+			waitThread(clientNetThread);
+		}
 		flushAndExit(1);
 	}
+}
+
+void printUsage(FILE* f, const char* program_name) {
+	fprintf(f, "Usage:\n  %s [--help|--version] <cluster_file1> <cluster_file2> <begin> <end>", program_name);
 }
 
 int main(int argc, char** argv) {
@@ -215,8 +227,22 @@ int main(int argc, char** argv) {
 		platformInit();
 		registerCrashHandler();
 		setThreadLocalDeterministicRandomSeed(1);
+		bool help = false;
+		bool version = false;
+		for (int i = 1; i < argc; ++i) {
+			if (std::string_view{ argv[i] } == "--help") help = true;
+			if (std::string_view{ argv[i] } == "--version") version = true;
+		}
+		if (help) {
+			printUsage(stdout, argv[0]);
+			flushAndExit(FDB_EXIT_SUCCESS);
+		}
+		if (version) {
+			printf("source version %s\n", CURRENT_GIT_VERSION);
+			flushAndExit(FDB_EXIT_SUCCESS);
+		}
 		if (argc != 5) {
-			fprintf(stderr, "Expected %s <cluster_file1> <cluster_file2> <begin> <end>", argv[0]);
+			printUsage(stderr, argv[0]);
 			flushAndExit(FDB_EXIT_ERROR);
 		}
 		mainActor(argv[1], argv[2], fromPrintable(argv[3]), fromPrintable(argv[4]));
