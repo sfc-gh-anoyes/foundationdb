@@ -210,13 +210,31 @@ ACTOR static void mainActor(std::string clusterFile1, std::string clusterFile2, 
 	}
 }
 
+void printUsage(FILE* f, const char* program_name) {
+	fprintf(f, "Usage:\n  %s [--help|--version] <cluster_file1> <cluster_file2> <begin> <end>", program_name);
+}
+
 int main(int argc, char** argv) {
 	try {
 		platformInit();
 		registerCrashHandler();
 		setThreadLocalDeterministicRandomSeed(1);
+		bool help = false;
+		bool version = false;
+		for (int i = 1; i < argc; ++i) {
+			if (std::string_view{ argv[i] } == "--help") help = true;
+			if (std::string_view{ argv[i] } == "--version") version = true;
+		}
+		if (help) {
+			printUsage(stdout, argv[0]);
+			flushAndExit(FDB_EXIT_SUCCESS);
+		}
+		if (version) {
+			printf("source version %s\n", CURRENT_GIT_VERSION);
+			flushAndExit(FDB_EXIT_SUCCESS);
+		}
 		if (argc != 5) {
-			fprintf(stderr, "Expected %s <cluster_file1> <cluster_file2> <begin> <end>", argv[0]);
+			printUsage(stderr, argv[0]);
 			flushAndExit(FDB_EXIT_ERROR);
 		}
 		mainActor(argv[1], argv[2], fromPrintable(argv[3]), fromPrintable(argv[4]));
