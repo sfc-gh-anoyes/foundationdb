@@ -180,6 +180,8 @@ std::string fromPrintable(const std::string& in) {
 }
 
 ACTOR static void mainActor(std::string clusterFile1, std::string clusterFile2, std::string begin, std::string end) {
+	state FDB::API* fdb = nullptr;
+	state THREAD_HANDLE clientNetThread;
 	try {
 		g_network = newNet2(false);
 		ASSERT(!FDB::API::isAPIVersionSelected());
@@ -192,20 +194,26 @@ ACTOR static void mainActor(std::string clusterFile1, std::string clusterFile2, 
 
 		int apiVersion = 300;
 
-		FDB::API* fdb = FDB::API::selectAPIVersion(apiVersion);
+		fdb = FDB::API::selectAPIVersion(apiVersion);
 		ASSERT(FDB::API::isAPIVersionSelected());
 		ASSERT(fdb->getAPIVersion() == apiVersion);
 		fdb->setupNetwork();
-		startThread(networkThread, fdb);
+		clientNetThread = startThread(networkThread, fdb);
 		TraceEvent::setNetworkThread();
 		selectTraceFormatter("json");
 		openTraceFile(NetworkAddress(), 10 << 20, 10 * 10 << 20);
 		bool result = wait(compareKeyRange(fdb, clusterFile1, clusterFile2, FDB::Key(begin), FDB::Key(end)));
+		fdb->stopNetwork();
+		waitThread(clientNetThread);
 		g_network->stop();
 		flushAndExit(result ? 0 : 1);
 	} catch (Error& e) {
 		fprintf(stderr, "Error: %s\n", e.name());
 		TraceEvent(SevError, "CompareKeyRangeError").error(e);
+		if (fdb) {
+			fdb->stopNetwork();
+			waitThread(clientNetThread);
+		}
 		flushAndExit(1);
 	}
 }
