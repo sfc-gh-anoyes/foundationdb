@@ -191,6 +191,18 @@ std::string fromPrintable(const std::string& in) {
 	return result;
 }
 
+std::string toPrintable(StringRef in) {
+	std::string result;
+	result.reserve(in.size() * 4);
+	for (auto iter = in.begin(); iter != in.end(); ++iter) {
+		result.push_back('\\');
+		result.push_back('x');
+		result.push_back("0123456789abcdef"[*iter / 16]);
+		result.push_back("0123456789abcdef"[*iter % 16]);
+	}
+	return result;
+}
+
 ACTOR Future<Void> collectRanges(Standalone<VectorRef<std::pair<StringRef, StringRef>>>* ranges,
                                  FutureStream<Optional<FDB::KeyValue>> kvs, int64_t* queueSize) {
 	state StringRef lastKey;
@@ -236,8 +248,8 @@ ACTOR Future<bool> genMakefileActor(FDB::API* fdb, std::string clusterFile1, std
 	for (const auto& [begin, end] : ranges) {
 		out << format("shard_%d_%s:\n", i, uid.c_str());
 		out << format("\tcompare_key_range %s %s \"%s\" \"%s\"\n", clusterFile1.c_str(), clusterFile2.c_str(),
-		              begin.printable().c_str(), end.printable().c_str());
-		out << format("\ttouch shard_%d_%s\n", i, uid.c_str());
+		              toPrintable(begin).c_str(), toPrintable(end).c_str());
+		out << format("\t@touch shard_%d_%s\n", i, uid.c_str());
 		++i;
 	}
 	out.close();
