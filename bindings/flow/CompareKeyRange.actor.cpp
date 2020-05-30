@@ -296,11 +296,24 @@ ACTOR static void mainActor(std::function<Future<bool>(FDB::API*)> f) {
 	}
 }
 
+static const char* helpText = R""(
+Usage:
+
+%s --help
+  Show this message and exit
+
+%s --version
+  Show the source version this binary was built from and exit
+
+%s --gen <cluster_file1> <cluster_file2>
+  Generate a Makefile to parallelize compare_key_range calls
+
+%s <cluster_file1> <cluster_file2> <begin> <end>
+  Compare the contents of db's at <cluster_file1> and <cluster_file2> for key range <begin> to <end>
+)"";
+
 void printUsage(FILE* f, const char* program_name) {
-	fprintf(f,
-	        "Usage:\n  %s [--help|--version] (--gen <cluster_file1> <cluster_file2> | <cluster_file1> <cluster_file2> "
-	        "<begin> <end>)",
-	        program_name);
+	fprintf(f, helpText, program_name, program_name, program_name, program_name);
 }
 
 int main(int argc, char** argv) {
@@ -326,6 +339,7 @@ int main(int argc, char** argv) {
 		if (gen) {
 			if (argc != 4 || std::string_view(argv[1]) != "--gen") {
 				printUsage(stderr, argv[0]);
+				flushAndExit(FDB_EXIT_ERROR);
 			}
 			mainActor([argv](FDB::API* fdb) { return genMakefileActor(fdb, argv[2], argv[3]); });
 		} else {
