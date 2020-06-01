@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <iostream>
+#include <fstream>
 
 #include "Arena.h"
 #include "FDBLoanerTypes.h"
@@ -19,13 +21,17 @@ THREAD_FUNC networkThread(void* api) {
 }
 
 ACTOR static Future<Void> readKeyRange(Reference<FDB::Database> db, FDB::Key begin, FDB::Key end,
-                                       PromiseStream<Optional<FDB::KeyValue>> outKvs, int64_t* queueSize) {
+                                       PromiseStream<Optional<FDB::KeyValue>> outKvs, int64_t* queueSize,
+                                       bool accessSystemKeys = false) {
 	state FDB::GetRangeLimits limit =
 	    FDB::GetRangeLimits(FDB::GetRangeLimits::ROW_LIMIT_UNLIMITED, FLOW_KNOBS->PACKET_WARNING);
 	state Future<Void> everySecond = delay(1);
 	state Reference<FDB::Transaction> tr = db->createTransaction();
 	tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_YOUR_WRITES_DISABLE);
 	tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_LOCK_AWARE);
+	if (accessSystemKeys) {
+		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_ACCESS_SYSTEM_KEYS);
+	}
 	state Future<FDB::FDBStandalone<FDB::RangeResultRef>> readFuture =
 	    tr->getRange(FDB::KeyRangeRef(begin, end), limit, /*snapshot*/ true);
 	loop {
@@ -35,6 +41,9 @@ ACTOR static Future<Void> readKeyRange(Reference<FDB::Database> db, FDB::Key beg
 				tr->reset();
 				tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_YOUR_WRITES_DISABLE);
 				tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_LOCK_AWARE);
+				if (accessSystemKeys) {
+					tr->setOption(FDBTransactionOption::FDB_TR_OPTION_ACCESS_SYSTEM_KEYS);
+				}
 				readFuture = tr->getRange(FDB::KeyRangeRef(begin, end), limit, /*snapshot*/ true);
 				everySecond = delay(1);
 			}
@@ -57,6 +66,9 @@ ACTOR static Future<Void> readKeyRange(Reference<FDB::Database> db, FDB::Key beg
 			wait(tr->onError(e));
 			tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_YOUR_WRITES_DISABLE);
 			tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_LOCK_AWARE);
+			if (accessSystemKeys) {
+				tr->setOption(FDBTransactionOption::FDB_TR_OPTION_ACCESS_SYSTEM_KEYS);
+			}
 			readFuture = tr->getRange(FDB::KeyRangeRef(begin, end), limit, /*snapshot*/ true);
 		}
 	}
@@ -179,7 +191,73 @@ std::string fromPrintable(const std::string& in) {
 	return result;
 }
 
-ACTOR static void mainActor(std::string clusterFile1, std::string clusterFile2, std::string begin, std::string end) {
+std::string toPrintable(StringRef in) {
+	std::string result;
+	result.reserve(in.size() * 4);
+	for (auto iter = in.begin(); iter != in.end(); ++iter) {
+		result.push_back('\\');
+		result.push_back('x');
+		result.push_back("0123456789abcdef"[*iter / 16]);
+		result.push_back("0123456789abcdef"[*iter % 16]);
+	}
+	return result;
+}
+
+ACTOR Future<Void> collectRanges(Standalone<VectorRef<std::pair<StringRef, StringRef>>>* ranges,
+                                 FutureStream<Optional<FDB::KeyValue>> kvs, int64_t* queueSize) {
+	state StringRef lastKey;
+	loop {
+		Optional<FDB::KeyValue> kv = waitNext(kvs);
+		if (!kv.present()) break;
+		*queueSize -= kv.get().expectedSize();
+		StringRef key{ ranges->arena(), kv.get().key.removePrefix(LiteralStringRef("\xff/keyServers/")) };
+		ranges->push_back(ranges->arena(), { lastKey, key });
+		lastKey = key;
+	}
+	ranges->push_back(ranges->arena(), { lastKey, LiteralStringRef("\xff") });
+	return Void();
+}
+
+ACTOR Future<bool> genMakefileActor(FDB::API* fdb, std::string clusterFile1, std::string clusterFile2) {
+	PromiseStream<Optional<FDB::KeyValue>> kvs1;
+	state int64_t queueSize1 = 0;
+	state Standalone<VectorRef<std::pair<StringRef, StringRef>>> ranges;
+	choose {
+		when(wait(readKeyRange(fdb->createDatabase(clusterFile1), LiteralStringRef("\xff/keyServers/\x00"),
+		                       LiteralStringRef("\xff/keyServers/\xff"), kvs1, &queueSize1,
+		                       /*accessSystemKeys*/ true))) {
+			ASSERT(false);
+		}
+		when(wait(collectRanges(&ranges, kvs1.getFuture(), &queueSize1))) {}
+	}
+	std::string uid = deterministicRandom()->randomUniqueID().toString();
+	std::ofstream out;
+	auto outFileName = format("compare_%s.mk", uid.c_str());
+	out.open(outFileName);
+	out << ".PHONY: all clean\n";
+	out << "all: ";
+	for (int i = 0; i < ranges.size(); ++i) {
+		if (i > 0) {
+			out << " ";
+		}
+		out << format("shard_%d_%s", i, uid.c_str());
+	}
+	out << "\n";
+	out << format("clean:\n\trm -f shard_*_%s\n", uid.c_str());
+	int i = 0;
+	for (const auto& [begin, end] : ranges) {
+		out << format("shard_%d_%s:\n", i, uid.c_str());
+		out << format("\tcompare_key_range %s %s \"%s\" \"%s\"\n", clusterFile1.c_str(), clusterFile2.c_str(),
+		              toPrintable(begin).c_str(), toPrintable(end).c_str());
+		out << format("\t@touch shard_%d_%s\n", i, uid.c_str());
+		++i;
+	}
+	out.close();
+	printf("Wrote %s\n", outFileName.c_str());
+	return true;
+}
+
+ACTOR static void mainActor(std::function<Future<bool>(FDB::API*)> f) {
 	state FDB::API* fdb = nullptr;
 	state THREAD_HANDLE clientNetThread;
 	try {
@@ -202,7 +280,7 @@ ACTOR static void mainActor(std::string clusterFile1, std::string clusterFile2, 
 		TraceEvent::setNetworkThread();
 		selectTraceFormatter("json");
 		openTraceFile(NetworkAddress(), 10 << 20, 10 * 10 << 20);
-		bool result = wait(compareKeyRange(fdb, clusterFile1, clusterFile2, FDB::Key(begin), FDB::Key(end)));
+		bool result = wait(f(fdb));
 		fdb->stopNetwork();
 		waitThread(clientNetThread);
 		g_network->stop();
@@ -218,20 +296,37 @@ ACTOR static void mainActor(std::string clusterFile1, std::string clusterFile2, 
 	}
 }
 
+static const char* helpText = R""(
+Usage:
+
+%s --help
+  Show this message and exit
+
+%s --version
+  Show the source version this binary was built from and exit
+
+%s --gen <cluster_file1> <cluster_file2>
+  Generate a Makefile to parallelize compare_key_range calls
+
+%s <cluster_file1> <cluster_file2> <begin> <end>
+  Compare the contents of db's at <cluster_file1> and <cluster_file2> for key range <begin> to <end>
+)"";
+
 void printUsage(FILE* f, const char* program_name) {
-	fprintf(f, "Usage:\n  %s [--help|--version] <cluster_file1> <cluster_file2> <begin> <end>", program_name);
+	fprintf(f, helpText, program_name, program_name, program_name, program_name);
 }
 
 int main(int argc, char** argv) {
 	try {
 		platformInit();
 		registerCrashHandler();
-		setThreadLocalDeterministicRandomSeed(1);
 		bool help = false;
 		bool version = false;
+		bool gen = false;
 		for (int i = 1; i < argc; ++i) {
 			if (std::string_view{ argv[i] } == "--help") help = true;
 			if (std::string_view{ argv[i] } == "--version") version = true;
+			if (std::string_view{ argv[i] } == "--gen") gen = true;
 		}
 		if (help) {
 			printUsage(stdout, argv[0]);
@@ -241,11 +336,22 @@ int main(int argc, char** argv) {
 			printf("source version %s\n", CURRENT_GIT_VERSION);
 			flushAndExit(FDB_EXIT_SUCCESS);
 		}
-		if (argc != 5) {
-			printUsage(stderr, argv[0]);
-			flushAndExit(FDB_EXIT_ERROR);
+		if (gen) {
+			if (argc != 4 || std::string_view(argv[1]) != "--gen") {
+				printUsage(stderr, argv[0]);
+				flushAndExit(FDB_EXIT_ERROR);
+			}
+			mainActor([argv](FDB::API* fdb) { return genMakefileActor(fdb, argv[2], argv[3]); });
+		} else {
+			if (argc != 5) {
+				printUsage(stderr, argv[0]);
+				flushAndExit(FDB_EXIT_ERROR);
+			}
+			mainActor([argv](FDB::API* fdb) {
+				return compareKeyRange(fdb, argv[1], argv[2], FDB::Key(fromPrintable(argv[3])),
+				                       FDB::Key(fromPrintable(argv[4])));
+			});
 		}
-		mainActor(argv[1], argv[2], fromPrintable(argv[3]), fromPrintable(argv[4]));
 		g_network->run();
 		flushAndExit(FDB_EXIT_SUCCESS);
 	} catch (Error& e) {
