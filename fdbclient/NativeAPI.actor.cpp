@@ -938,13 +938,11 @@ void setNetworkOption(FDBNetworkOptions::Option option, Optional<StringRef> valu
 #endif
 			break;
 		case FDBNetworkOptions::CLIENT_BUGGIFY_ENABLE:
-		    /* Disabled because it conflicts with an fdb3 network option */
-		    /* enableBuggify(true, BuggifyType::Client); */
-		    break;
+			enableBuggify(true, BuggifyType::Client);
+			break;
 		case FDBNetworkOptions::CLIENT_BUGGIFY_DISABLE:
-		    /* Disabled because it conflicts with an fdb3 network option */
-		    /* enableBuggify(false, BuggifyType::Client); */
-		    break;
+			enableBuggify(false, BuggifyType::Client);
+			break;
 		case FDBNetworkOptions::CLIENT_BUGGIFY_SECTION_ACTIVATED_PROBABILITY:
 			validateOptionValue(value, true);
 			clearBuggifySections(BuggifyType::Client);
