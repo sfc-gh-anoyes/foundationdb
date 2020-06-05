@@ -414,39 +414,19 @@ public:
 	Future<Void> byteSampleRecovery;
 	Future<Void> durableInProgress;
 
-	struct StorageWatch {
-		AsyncVar<ErrorOr<Optional<Value>>> value;
-		int refCount = 0;
+	struct StorageWatch : ReferenceCounted<StorageWatch> {
+		ErrorOr<Optional<Value>> value;
+		Promise<Void> onChange;
 		Version version = invalidVersion;
-	};
-	struct WatchReference {
-		StorageWatch& watch() { return iter->second; }
-		WatchReference() : watches(nullptr) {}
-		WatchReference(WatchReference&&) = default;
-		WatchReference& operator=(WatchReference&&) = default;
-		WatchReference(const WatchReference&) = delete;
-		WatchReference& operator=(const WatchReference&) = delete;
-		WatchReference(std::map<Key, StorageWatch>* watches, std::map<Key, StorageWatch>::iterator iter)
-		  : watches(watches), iter(iter) {
-			++iter->second.refCount;
+		// Erase key from watches if this returns true
+		[[nodiscard]] bool trySet(Version newVersion, const ErrorOr<Optional<Value>>& newValue) {
+			bool fire = newVersion > version && value != newValue;
+			version = std::max(newVersion, version);
+			if (fire) onChange.send(Void());
+			return fire;
 		}
-		~WatchReference() {
-			if (watches) {
-				if (--iter->second.refCount == 0) {
-					watches->erase(iter);
-				}
-			}
-		}
-
-	private:
-		std::map<Key, StorageWatch>* watches;
-		std::map<Key, StorageWatch>::iterator iter;
 	};
-	std::map<Key, StorageWatch> watches;
-	WatchReference getWatch(const Key& k) {
-		auto [iter, b] = watches.insert(std::make_pair(k, StorageWatch()));
-		return WatchReference(&watches, iter);
-	}
+	std::map<Key, Reference<StorageWatch>> watches;
 
 	int64_t watchBytes;
 	int64_t numWatches;
@@ -1047,9 +1027,8 @@ ACTOR Future<Void> initWatch(StorageServer* data, StorageServer::StorageWatch* w
 			if (reply.error.present()) {
 				throw reply.error.get();
 			}
-			if (watch->version < latest) {
-				watch->version = latest;
-				watch->value.set(ErrorOr<Optional<Value>>(reply.value));
+			if (watch->trySet(latest, ErrorOr<Optional<Value>>(reply.value))) {
+				data->watches.erase(key);
 			}
 			break;
 		} catch (Error& e) {
@@ -1075,15 +1054,25 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 			g_traceBatch.addEvent("WatchValueDebug", req.debugID.get().first(), "watchValueQ.AfterVersion"); //.detail("TaskID", g_network->getCurrentTask());
 
 		state Future<Void> watchFuture;
-		state StorageServer::WatchReference watchReference = data->getWatch(req.key);
-		state StorageServer::StorageWatch* watch = &watchReference.watch();
-		if (watch->version < req.version) {
-			watch->version = req.version;
-			watch->value.set(ErrorOr<Optional<Value>>(req.value));
+		auto& watch_ = data->watches[req.key];
+		if (watch_) {
+			if (watch_->version > req.version && watch_->value != ErrorOr<Optional<Value>>{ req.value }) {
+				req.reply.send(WatchValueReply{ watch_->version });
+				return Void();
+			} else {
+				if (watch_->trySet(req.version, ErrorOr<Optional<Value>>{ req.value })) {
+					watch_ = Reference<StorageServer::StorageWatch>(new StorageServer::StorageWatch);
+				}
+			}
+		} else {
+			watch_ = Reference<StorageServer::StorageWatch>(new StorageServer::StorageWatch);
 		}
-		watchFuture = watch->value.onChange();
-		if (watch->refCount == 1) {
-			watchFuture = watchFuture || initWatch(data, watch, req.key, req.tags, req.debugID);
+		state Reference<StorageServer::StorageWatch> watch = std::move(watch_);
+		watchFuture = watch->onChange.getFuture();
+		if (watch->version == invalidVersion) {
+			watch_->value = req.value;
+			watch_->version = req.version;
+			watchFuture = watchFuture || initWatch(data, watch.getPtr(), req.key, req.tags, req.debugID);
 		}
 
 		if (data->watchBytes > SERVER_KNOBS->MAX_STORAGE_SERVER_WATCH_BYTES) {
@@ -1103,8 +1092,8 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 			data->watchBytes -= (req.key.expectedSize() + req.value.expectedSize() + 1000);
 			throw;
 		}
-		if (watch->value.get().isError()) throw watch->value.get().getError();
-		ASSERT(watch->value.get().get() != req.value);
+		if (watch->value.isError()) throw watch->value.getError();
+		ASSERT(watch->value.get() != req.value);
 		req.reply.send(WatchValueReply{ watch->version });
 	} catch (Error& e) {
 		if(!canReplyWith(e))
@@ -1937,20 +1926,21 @@ void applyMutation( StorageServer *self, MutationRef const& m, Arena& arena, Sto
 		data.insert( m.param1, ValueOrClearToRef::value(m.param2) );
 		auto iter = self->watches.find(m.param1);
 		if (iter != self->watches.end()) {
-			ASSERT(iter->second.version <= self->data().latestVersion);
-			iter->second.version = self->data().latestVersion;
-			iter->second.value.set(ErrorOr<Optional<Value>>(m.param2));
+			if (iter->second->trySet(self->data().latestVersion, ErrorOr<Optional<Value>>(m.param2))) {
+				self->watches.erase(iter);
+			}
 		}
 	} else if (m.type == MutationRef::ClearRange) {
 		data.erase( m.param1, m.param2 );
 		ASSERT( m.param2 > m.param1 );
 		ASSERT( !data.isClearContaining( data.atLatest(), m.param1 ) );
 		data.insert( m.param1, ValueOrClearToRef::clearTo(m.param2) );
-		for (auto iter = self->watches.lower_bound(m.param1); iter != self->watches.end() && iter->first < m.param2;
-		     ++iter) {
-			ASSERT(iter->second.version <= self->data().latestVersion);
-			iter->second.version = self->data().latestVersion;
-			iter->second.value.set(ErrorOr<Optional<Value>>{});
+		for (auto iter = self->watches.lower_bound(m.param1); iter != self->watches.end() && iter->first < m.param2;) {
+			if (iter->second->trySet(self->data().latestVersion, ErrorOr<Optional<Value>>(m.param2))) {
+				iter = self->watches.erase(iter);
+			} else {
+				++iter;
+			}
 		}
 	}
 
@@ -2534,9 +2524,11 @@ void changeServerKeys( StorageServer* data, const KeyRangeRef& keys, bool nowAss
 			data->addShard( ShardInfo::newNotAssigned(range) );
 			for (auto iter = data->watches.lower_bound(range.begin);
 			     iter != data->watches.end() && iter->first < range.end; ++iter) {
-				ASSERT(iter->second.version <= version);
-				iter->second.version = version;
-				iter->second.value.set(ErrorOr<Optional<Value>>(wrong_shard_server()));
+				if (iter->second->trySet(version, ErrorOr<Optional<Value>>{ wrong_shard_server() })) {
+					iter = data->watches.erase(iter);
+				} else {
+					++iter;
+				}
 			}
 		} else if (!dataAvailable) {
 			// SOMEDAY: Avoid restarting adding/transferred shards
