@@ -414,7 +414,36 @@ public:
 	Future<Void> byteSampleRecovery;
 	Future<Void> durableInProgress;
 
-	AsyncMap<Key,bool> watches;
+	struct StorageWatch {
+		AsyncVar<ErrorOr<Optional<Value>>> value;
+		int refCount = 0;
+		Version version = invalidVersion;
+	};
+	struct WatchReference {
+		StorageWatch& watch() { return iter->second; }
+		WatchReference() : watches(nullptr) {}
+		WatchReference(std::map<Key, StorageWatch>* watches, std::map<Key, StorageWatch>::iterator iter)
+		  : watches(watches), iter(iter) {
+			++iter->second.refCount;
+		}
+		~WatchReference() {
+			if (watches) {
+				if (--iter->second.refCount == 0) {
+					watches->erase(iter);
+				}
+			}
+		}
+
+	private:
+		std::map<Key, StorageWatch>* watches;
+		std::map<Key, StorageWatch>::iterator iter;
+	};
+	std::map<Key, StorageWatch> watches;
+	WatchReference getWatch(const Key& k) {
+		auto [iter, b] = watches.insert(std::make_pair(k, StorageWatch()));
+		return WatchReference(&watches, iter);
+	}
+
 	int64_t watchBytes;
 	int64_t numWatches;
 	AsyncVar<bool> noRecentUpdates;
@@ -1002,9 +1031,37 @@ ACTOR Future<Void> getValueQ( StorageServer* data, GetValueRequest req ) {
 	return Void();
 };
 
+ACTOR Future<Void> initWatch(StorageServer* data, StorageServer::StorageWatch* watch, Key key, Optional<TagSet> tags,
+                             Optional<UID> debugID) {
+	loop {
+		try {
+			state Version latest = data->data().latestVersion;
+			wait(data->version.whenAtLeast(latest));
+			GetValueRequest getReq(key, latest, tags, debugID);
+			state Future<Void> getValue = getValueQ(data, getReq);
+			GetValueReply reply = wait(getReq.reply.getFuture());
+			if (reply.error.present()) {
+				throw reply.error.get();
+			}
+			if (watch->version < latest) {
+				watch->value = ErrorOr<Optional<Value>>(reply.value);
+				watch->version = latest;
+			}
+			break;
+		} catch (Error& e) {
+			if (e.code() != error_code_transaction_too_old) throw;
+		}
+	}
+	return Never();
+}
+
 ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req ) {
 	try {
 		++data->counters.watchQueries;
+
+		// Active load balancing runs at a very high priority (to obtain accurate queue lengths)
+		// so we need to downgrade here
+		wait(delay(0, TaskPriority::DefaultEndpoint));
 
 		if( req.debugID.present() )
 			g_traceBatch.addEvent("WatchValueDebug", req.debugID.get().first(), "watchValueQ.Before"); //.detail("TaskID", g_network->getCurrentTask());
@@ -1013,51 +1070,38 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 		if( req.debugID.present() )
 			g_traceBatch.addEvent("WatchValueDebug", req.debugID.get().first(), "watchValueQ.AfterVersion"); //.detail("TaskID", g_network->getCurrentTask());
 
-		loop {
-			try {
-				state Version latest = data->data().latestVersion;
-				state Future<Void> watchFuture = data->watches.onChange(req.key);
-				GetValueRequest getReq( req.key, latest, req.tags, req.debugID );
-				state Future<Void> getValue = getValueQ( data, getReq ); //we are relying on the delay zero at the top of getValueQ, if removed we need one here
-				GetValueReply reply = wait( getReq.reply.getFuture() );
-				//TraceEvent("WatcherCheckValue").detail("Key",  req.key  ).detail("Value",  req.value  ).detail("CurrentValue",  v  ).detail("Ver", latest);
-
-				if(reply.error.present()) {
-					throw reply.error.get();
-				}
-
-				debugMutation("ShardWatchValue", latest, MutationRef(MutationRef::DebugKey, req.key, reply.value.present() ? StringRef( reply.value.get() ) : LiteralStringRef("<null>") ) );
-
-				if( req.debugID.present() )
-					g_traceBatch.addEvent("WatchValueDebug", req.debugID.get().first(), "watchValueQ.AfterRead"); //.detail("TaskID", g_network->getCurrentTask());
-
-				if( reply.value != req.value ) {
-					req.reply.send(WatchValueReply{ latest });
-					return Void();
-				}
-
-				if( data->watchBytes > SERVER_KNOBS->MAX_STORAGE_SERVER_WATCH_BYTES ) {
-					TEST(true); //Too many watches, reverting to polling
-					data->sendErrorWithPenalty(req.reply, watch_cancelled(), data->getPenalty());
-					return Void();
-				}
-
-				++data->numWatches;
-				data->watchBytes += ( req.key.expectedSize() + req.value.expectedSize() + 1000 );
-				try {
-					wait( watchFuture );
-					--data->numWatches;
-					data->watchBytes -= ( req.key.expectedSize() + req.value.expectedSize() + 1000 );
-				} catch( Error &e ) {
-					--data->numWatches;
-					data->watchBytes -= ( req.key.expectedSize() + req.value.expectedSize() + 1000 );
-					throw;
-				}
-			} catch( Error &e ) {
-				if( e.code() != error_code_transaction_too_old )
-					throw;
-			}
+		state Future<Void> watchFuture;
+		state StorageServer::WatchReference watchReference = data->getWatch(req.key);
+		state StorageServer::StorageWatch& watch = watchReference.watch();
+		if (watch.version < req.version) {
+			watch.version = req.version;
+			watch.value.set(ErrorOr<Optional<Value>>(req.value));
 		}
+		watchFuture = watch.value.onChange();
+		if (watch.refCount == 1) {
+			watchFuture = watchFuture || initWatch(data, &watch, req.key, req.tags, req.debugID);
+		}
+
+		if (data->watchBytes > SERVER_KNOBS->MAX_STORAGE_SERVER_WATCH_BYTES) {
+			TEST(true); // Too many watches, reverting to polling
+			data->sendErrorWithPenalty(req.reply, watch_cancelled(), data->getPenalty());
+			return Void();
+		}
+
+		++data->numWatches;
+		data->watchBytes += (req.key.expectedSize() + req.value.expectedSize() + 1000);
+		try {
+			wait(watchFuture);
+			--data->numWatches;
+			data->watchBytes -= (req.key.expectedSize() + req.value.expectedSize() + 1000);
+		} catch (Error& e) {
+			--data->numWatches;
+			data->watchBytes -= (req.key.expectedSize() + req.value.expectedSize() + 1000);
+			throw;
+		}
+		if (watch.value.get().isError()) throw watch.value.get().getError();
+		ASSERT(watch.value.get().get() != req.value);
+		req.reply.send(WatchValueReply{ watch.version });
 	} catch (Error& e) {
 		if(!canReplyWith(e))
 			throw;
@@ -1887,13 +1931,23 @@ void applyMutation( StorageServer *self, MutationRef const& m, Arena& arena, Sto
 			}
 		}
 		data.insert( m.param1, ValueOrClearToRef::value(m.param2) );
-		self->watches.trigger( m.param1 );
+		auto iter = self->watches.find(m.param1);
+		if (iter != self->watches.end()) {
+			ASSERT(iter->second.version <= self->data().latestVersion);
+			iter->second.version = self->data().latestVersion;
+			iter->second.value.set(ErrorOr<Optional<Value>>(m.param2));
+		}
 	} else if (m.type == MutationRef::ClearRange) {
 		data.erase( m.param1, m.param2 );
 		ASSERT( m.param2 > m.param1 );
 		ASSERT( !data.isClearContaining( data.atLatest(), m.param1 ) );
 		data.insert( m.param1, ValueOrClearToRef::clearTo(m.param2) );
-		self->watches.triggerRange( m.param1, m.param2 );
+		for (auto iter = self->watches.lower_bound(m.param1); iter != self->watches.end() && iter->first < m.param2;
+		     ++iter) {
+			ASSERT(iter->second.version <= self->data().latestVersion);
+			iter->second.version = self->data().latestVersion;
+			iter->second.value.set(ErrorOr<Optional<Value>>{});
+		}
 	}
 
 }
@@ -2474,7 +2528,12 @@ void changeServerKeys( StorageServer* data, const KeyRangeRef& keys, bool nowAss
 				removeRanges.push_back( range );
 			}
 			data->addShard( ShardInfo::newNotAssigned(range) );
-			data->watches.triggerRange( range.begin, range.end );
+			for (auto iter = data->watches.lower_bound(range.begin);
+			     iter != data->watches.end() && iter->first < range.end; ++iter) {
+				ASSERT(iter->second.version <= version);
+				iter->second.version = version;
+				iter->second.value.set(ErrorOr<Optional<Value>>(wrong_shard_server()));
+			}
 		} else if (!dataAvailable) {
 			// SOMEDAY: Avoid restarting adding/transferred shards
 			if (version==0){ // bypass fetchkeys; shard is known empty at version 0
