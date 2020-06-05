@@ -187,6 +187,11 @@ public:
 	}
 	T orDefault(T const& default_value) const { if (present()) return get(); else return default_value; }
 
+	bool operator==(ErrorOr const& o) const {
+		return present() == o.present() && (present() ? get() == o.get() : getError().code() == o.getError().code());
+	}
+	bool operator!=(ErrorOr const& o) const { return !(*this == o); }
+
 	template <class Ar>
 	void serialize(Ar& ar) {
 		// SOMEDAY: specialize for space efficiency?

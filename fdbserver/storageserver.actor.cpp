@@ -422,6 +422,10 @@ public:
 	struct WatchReference {
 		StorageWatch& watch() { return iter->second; }
 		WatchReference() : watches(nullptr) {}
+		WatchReference(WatchReference&&) = default;
+		WatchReference& operator=(WatchReference&&) = default;
+		WatchReference(const WatchReference&) = delete;
+		WatchReference& operator=(const WatchReference&) = delete;
 		WatchReference(std::map<Key, StorageWatch>* watches, std::map<Key, StorageWatch>::iterator iter)
 		  : watches(watches), iter(iter) {
 			++iter->second.refCount;
@@ -1072,14 +1076,14 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 
 		state Future<Void> watchFuture;
 		state StorageServer::WatchReference watchReference = data->getWatch(req.key);
-		state StorageServer::StorageWatch& watch = watchReference.watch();
-		if (watch.version < req.version) {
-			watch.version = req.version;
-			watch.value.set(ErrorOr<Optional<Value>>(req.value));
+		state StorageServer::StorageWatch* watch = &watchReference.watch();
+		if (watch->version < req.version) {
+			watch->version = req.version;
+			watch->value.set(ErrorOr<Optional<Value>>(req.value));
 		}
-		watchFuture = watch.value.onChange();
-		if (watch.refCount == 1) {
-			watchFuture = watchFuture || initWatch(data, &watch, req.key, req.tags, req.debugID);
+		watchFuture = watch->value.onChange();
+		if (watch->refCount == 1) {
+			watchFuture = watchFuture || initWatch(data, watch, req.key, req.tags, req.debugID);
 		}
 
 		if (data->watchBytes > SERVER_KNOBS->MAX_STORAGE_SERVER_WATCH_BYTES) {
@@ -1099,9 +1103,9 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 			data->watchBytes -= (req.key.expectedSize() + req.value.expectedSize() + 1000);
 			throw;
 		}
-		if (watch.value.get().isError()) throw watch.value.get().getError();
-		ASSERT(watch.value.get().get() != req.value);
-		req.reply.send(WatchValueReply{ watch.version });
+		if (watch->value.get().isError()) throw watch->value.get().getError();
+		ASSERT(watch->value.get().get() != req.value);
+		req.reply.send(WatchValueReply{ watch->version });
 	} catch (Error& e) {
 		if(!canReplyWith(e))
 			throw;
