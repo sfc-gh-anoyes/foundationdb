@@ -422,7 +422,10 @@ public:
 		[[nodiscard]] bool trySet(Version newVersion, const ErrorOr<Optional<Value>>& newValue) {
 			bool fire = newVersion > version && value != newValue;
 			version = std::max(newVersion, version);
-			if (fire) onChange.send(Void());
+			if (fire) {
+				value = newValue;
+				onChange.send(Void());
+			}
 			return fire;
 		}
 	};
@@ -1067,11 +1070,11 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 		} else {
 			watch_ = Reference<StorageServer::StorageWatch>(new StorageServer::StorageWatch);
 		}
-		state Reference<StorageServer::StorageWatch> watch = std::move(watch_);
+		state Reference<StorageServer::StorageWatch> watch = watch_;
 		watchFuture = watch->onChange.getFuture();
 		if (watch->version == invalidVersion) {
-			watch_->value = req.value;
-			watch_->version = req.version;
+			watch->value = req.value;
+			watch->version = req.version;
 			watchFuture = watchFuture || initWatch(data, watch.getPtr(), req.key, req.tags, req.debugID);
 		}
 
