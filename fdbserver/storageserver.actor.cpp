@@ -1048,8 +1048,8 @@ ACTOR Future<Void> initWatch(StorageServer* data, StorageServer::StorageWatch* w
 				throw reply.error.get();
 			}
 			if (watch->version < latest) {
-				watch->value = ErrorOr<Optional<Value>>(reply.value);
 				watch->version = latest;
+				watch->value.set(ErrorOr<Optional<Value>>(reply.value));
 			}
 			break;
 		} catch (Error& e) {
