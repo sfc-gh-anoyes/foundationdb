@@ -1088,9 +1088,15 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 		data->watchBytes += (req.key.expectedSize() + req.value.expectedSize() + 1000);
 		try {
 			wait(watchFuture);
+			if (watch->isSoleOwner()) {
+				data->watches.erase(req.key);
+			}
 			--data->numWatches;
 			data->watchBytes -= (req.key.expectedSize() + req.value.expectedSize() + 1000);
 		} catch (Error& e) {
+			if (watch->isSoleOwner()) {
+				data->watches.erase(req.key);
+			}
 			--data->numWatches;
 			data->watchBytes -= (req.key.expectedSize() + req.value.expectedSize() + 1000);
 			throw;
