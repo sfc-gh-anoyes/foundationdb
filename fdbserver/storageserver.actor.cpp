@@ -2526,7 +2526,7 @@ void changeServerKeys( StorageServer* data, const KeyRangeRef& keys, bool nowAss
 			}
 			data->addShard( ShardInfo::newNotAssigned(range) );
 			for (auto iter = data->watches.lower_bound(range.begin);
-			     iter != data->watches.end() && iter->first < range.end; ++iter) {
+			     iter != data->watches.end() && iter->first < range.end;) {
 				if (iter->second->trySet(version, ErrorOr<Optional<Value>>{ wrong_shard_server() })) {
 					iter = data->watches.erase(iter);
 				} else {
