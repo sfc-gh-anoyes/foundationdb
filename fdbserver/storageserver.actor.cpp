@@ -414,20 +414,45 @@ public:
 	Future<Void> byteSampleRecovery;
 	Future<Void> durableInProgress;
 
+	// Represents the current state of all watches in this storage server on some key.
+	// Possible states are:
+	// 1. No watches on the key (key not in watches)
+	// 2. At least one watch on the key, waiting for the value to change from |value| after |version|
+	//
+	// StorageWatches must be erased from the watches map immediately after firing or expiring.
 	struct StorageWatch : ReferenceCounted<StorageWatch> {
-		ErrorOr<Optional<Value>> value;
-		Promise<Void> onChange;
-		Version version = invalidVersion;
-		// Erase key from watches if this returns true
+		// If this returns true, then the watch fired. Caller is responsible for erasing the key from watches if this
+		// fires.
 		[[nodiscard]] bool trySet(Version newVersion, const ErrorOr<Optional<Value>>& newValue) {
+			ASSERT(!newValue.isError() || newValue.getError().code() != error_code_operation_cancelled);
+			// Technically we would be allowed to fire all watches whose
+			// version is less than newVersion, but since we're allowed to skip
+			// firing in the ABA case anyway, let's save the bookkeeping and
+			// have them all wait for a change after newVersion
 			bool fire = newVersion > version && value != newValue;
 			version = std::max(newVersion, version);
 			if (fire) {
 				value = newValue;
-				onChange.send(Void());
+				onFire.send(Void());
 			}
 			return fire;
 		}
+
+		void init(Version newVersion, const Optional<Value>& newValue) {
+			ASSERT(version == invalidVersion);
+			ASSERT(newVersion != invalidVersion);
+			version = newVersion;
+			value = newValue;
+		}
+
+		const ErrorOr<Optional<Value>>& getValue() const { return value; }
+		Future<Void> getOnFire() { return onFire.getFuture(); }
+		Version getVersion() const { return version; }
+
+	private:
+		ErrorOr<Optional<Value>> value;
+		Promise<Void> onFire;
+		Version version = invalidVersion;
 	};
 	std::map<Key, Reference<StorageWatch>> watches;
 
@@ -1018,6 +1043,8 @@ ACTOR Future<Void> getValueQ( StorageServer* data, GetValueRequest req ) {
 	return Void();
 };
 
+// We're guaranteed to get notified for changes at versions > latestVersion, so read at latestVersion to make sure we
+// don't miss getting notified.
 ACTOR Future<Void> initWatch(StorageServer* data, StorageServer::StorageWatch* watch, Key key, Optional<TagSet> tags,
                              Optional<UID> debugID) {
 	loop {
@@ -1049,6 +1076,13 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 		// so we need to downgrade here
 		wait(delay(0, TaskPriority::DefaultEndpoint));
 
+		if (data->watchBytes > SERVER_KNOBS->MAX_STORAGE_SERVER_WATCH_BYTES) {
+			TEST(true); // Too many watches, reverting to polling
+			g_traceBatch.addEvent("WatchValueDebug", req.debugID.get().first(), "watchValueQ.RevertToPolling");
+			data->sendErrorWithPenalty(req.reply, watch_cancelled(), data->getPenalty());
+			return Void();
+		}
+
 		if( req.debugID.present() )
 			g_traceBatch.addEvent("WatchValueDebug", req.debugID.get().first(), "watchValueQ.Before"); //.detail("TaskID", g_network->getCurrentTask());
 
@@ -1057,31 +1091,33 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 			g_traceBatch.addEvent("WatchValueDebug", req.debugID.get().first(), "watchValueQ.AfterVersion"); //.detail("TaskID", g_network->getCurrentTask());
 
 		state Future<Void> watchFuture;
-		auto& watch_ = data->watches[req.key];
-		if (watch_) {
-			if (watch_->version > req.version && watch_->value != ErrorOr<Optional<Value>>{ req.value }) {
-				req.reply.send(WatchValueReply{ watch_->version });
-				return Void();
-			} else {
-				if (watch_->trySet(req.version, ErrorOr<Optional<Value>>{ req.value })) {
-					watch_ = Reference<StorageServer::StorageWatch>(new StorageServer::StorageWatch);
+		state Reference<StorageServer::StorageWatch> watch;
+		{
+			auto& watch_ = data->watches[req.key];
+			if (watch_) {
+				// Otherwise we failed to clean up a watch that was cancelled or completed
+				ASSERT(!watch_->isSoleOwner());
+				if (watch_->getVersion() > req.version && watch_->getValue() != req.value) {
+					// If we sent an error, then we should have already erased this
+					// key from data->watches. This should only happen if the watch
+					// was initialized from a watch request with a later version.
+					ASSERT(!watch_->getValue().isError());
+					req.reply.send(WatchValueReply{ watch_->getVersion() });
+					return Void();
+				} else {
+					if (watch_->trySet(req.version, req.value)) {
+						watch_ = Reference<StorageServer::StorageWatch>(new StorageServer::StorageWatch);
+					}
 				}
+			} else {
+				watch_ = Reference<StorageServer::StorageWatch>(new StorageServer::StorageWatch);
 			}
-		} else {
-			watch_ = Reference<StorageServer::StorageWatch>(new StorageServer::StorageWatch);
+			watch = watch_;
 		}
-		state Reference<StorageServer::StorageWatch> watch = watch_;
-		watchFuture = watch->onChange.getFuture();
-		if (watch->version == invalidVersion) {
-			watch->value = req.value;
-			watch->version = req.version;
+		watchFuture = watch->getOnFire();
+		if (watch->getVersion() == invalidVersion) {
+			watch->init(req.version, req.value);
 			watchFuture = watchFuture || initWatch(data, watch.getPtr(), req.key, req.tags, req.debugID);
-		}
-
-		if (data->watchBytes > SERVER_KNOBS->MAX_STORAGE_SERVER_WATCH_BYTES) {
-			TEST(true); // Too many watches, reverting to polling
-			data->sendErrorWithPenalty(req.reply, watch_cancelled(), data->getPenalty());
-			return Void();
 		}
 
 		++data->numWatches;
@@ -1093,11 +1129,17 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 		} catch (Error& e) {
 			--data->numWatches;
 			data->watchBytes -= (req.key.expectedSize() + req.value.expectedSize() + 1000);
+			auto* watchPtr = watch.extractPtr();
+			watchPtr->delref();
+			if (watchPtr->isSoleOwner()) {
+				data->watches.erase(req.key);
+				TEST(true); // Cleaned up resources for failed (timed out?) watch
+			}
 			throw;
 		}
-		if (watch->value.isError()) throw watch->value.getError();
-		ASSERT(watch->value.get() != req.value);
-		req.reply.send(WatchValueReply{ watch->version });
+		if (watch->getValue().isError()) throw watch->getValue().getError();
+		ASSERT(watch->getValue().get() != req.value);
+		req.reply.send(WatchValueReply{ watch->getVersion() });
 	} catch (Error& e) {
 		if(!canReplyWith(e))
 			throw;
