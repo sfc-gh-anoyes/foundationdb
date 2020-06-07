@@ -3787,7 +3787,6 @@ ACTOR Future<Void> serveWatchValueRequests( StorageServer* self, FutureStream<Wa
 	loop {
 		WatchValueRequest req = waitNext(watchValue);
 		// TODO: fast load balancing?
-		// SOMEDAY: combine watches for the same key/value into a single watch
 		self->actors.add(self->readGuard(req, watchValueQ));
 	}
 }
