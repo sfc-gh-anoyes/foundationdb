@@ -1093,7 +1093,6 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 
 		if (data->watchBytes > SERVER_KNOBS->MAX_STORAGE_SERVER_WATCH_BYTES) {
 			TEST(true); // Too many watches, reverting to polling
-			g_traceBatch.addEvent("WatchValueDebug", req.debugID.get().first(), "watchValueQ.RevertToPolling");
 			data->sendErrorWithPenalty(req.reply, watch_cancelled(), data->getPenalty());
 			return Void();
 		}
