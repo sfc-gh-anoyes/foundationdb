@@ -424,18 +424,19 @@ public:
 		// If this returns true, then the watch fired. Caller is responsible for erasing the key from watches if this
 		// fires.
 		[[nodiscard]] bool trySet(Version newVersion, const ErrorOr<Optional<Value>>& newValue) {
+			ASSERT(!fired);
 			ASSERT(!newValue.isError() || newValue.getError().code() != error_code_operation_cancelled);
 			// Technically we would be allowed to fire all watches whose
 			// version is less than newVersion, but since we're allowed to skip
 			// firing in the ABA case anyway, let's save the bookkeeping and
 			// have them all wait for a change after newVersion
-			bool fire = newVersion > version && value != newValue;
+			fired = newVersion > version && value != newValue;
 			version = std::max(newVersion, version);
-			if (fire) {
+			if (fired) {
 				value = newValue;
 				onFire.send(Void());
 			}
-			return fire;
+			return fired;
 		}
 
 		void init(Version newVersion, const Optional<Value>& newValue) {
@@ -448,11 +449,13 @@ public:
 		const ErrorOr<Optional<Value>>& getValue() const { return value; }
 		Future<Void> getOnFire() { return onFire.getFuture(); }
 		Version getVersion() const { return version; }
+		bool getFired() const { return fired; }
 
 	private:
 		ErrorOr<Optional<Value>> value;
 		Promise<Void> onFire;
 		Version version = invalidVersion;
+		bool fired = false;
 	};
 	std::map<Key, Reference<StorageWatch>> watches;
 
@@ -1043,27 +1046,39 @@ ACTOR Future<Void> getValueQ( StorageServer* data, GetValueRequest req ) {
 	return Void();
 };
 
-// We're guaranteed to get notified for changes at versions > latestVersion, so read at latestVersion to make sure we
-// don't miss getting notified.
+// We're guaranteed to get notified for changes at versions > latestVersion, so
+// (eventually) read at latestVersion to make sure we don't miss getting
+// notified.
 ACTOR Future<Void> initWatch(StorageServer* data, StorageServer::StorageWatch* watch, Key key, Optional<TagSet> tags,
                              Optional<UID> debugID) {
+	state bool firstAttempt = true;
 	loop {
 		try {
-			state Version latest = data->data().latestVersion;
-			wait(data->version.whenAtLeast(latest));
-			GetValueRequest getReq(key, latest, tags, debugID);
+			state Version version;
+			if (firstAttempt) {
+				// Optimize for case where the value has already changed
+				version = data->version.get();
+			} else {
+				version = data->data().latestVersion;
+				wait(data->version.whenAtLeast(version));
+			}
+			GetValueRequest getReq(key, version, tags, debugID);
 			state Future<Void> getValue = getValueQ(data, getReq);
 			GetValueReply reply = wait(getReq.reply.getFuture());
 			if (reply.error.present()) {
 				throw reply.error.get();
 			}
-			if (watch->trySet(latest, ErrorOr<Optional<Value>>(reply.value))) {
+			if (watch->trySet(version, ErrorOr<Optional<Value>>(reply.value))) {
 				data->watches.erase(key);
 			}
-			break;
+			// If the watch becomes ready before this point it will get cancelled anyway
+			if (!firstAttempt) {
+				break;
+			}
 		} catch (Error& e) {
 			if (e.code() != error_code_transaction_too_old) throw;
 		}
+		firstAttempt = false;
 	}
 	return Never();
 }
@@ -1097,7 +1112,7 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 			if (watch_) {
 				// Otherwise we failed to clean up a watch that was cancelled or completed
 				ASSERT(!watch_->isSoleOwner());
-				if (watch_->getVersion() > req.version && watch_->getValue() != req.value) {
+				if (watch_->getVersion() >= req.version && watch_->getValue() != req.value) {
 					// If we sent an error, then we should have already erased this
 					// key from data->watches. This should only happen if the watch
 					// was initialized from a watch request with a later version.
@@ -1119,6 +1134,7 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 			watch->init(req.version, req.value);
 			watchFuture = watchFuture || initWatch(data, watch.getPtr(), req.key, req.tags, req.debugID);
 		}
+		ASSERT(watchFuture.isReady() || watch->getValue() == req.value);
 
 		++data->numWatches;
 		data->watchBytes += (req.key.expectedSize() + req.value.expectedSize() + 1000);
@@ -1129,11 +1145,13 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 		} catch (Error& e) {
 			--data->numWatches;
 			data->watchBytes -= (req.key.expectedSize() + req.value.expectedSize() + 1000);
-			auto* watchPtr = watch.extractPtr();
-			watchPtr->delref();
-			if (watchPtr->isSoleOwner()) {
-				data->watches.erase(req.key);
-				TEST(true); // Cleaned up resources for failed (timed out?) watch
+			if (!watch->getFired()) {
+				auto* watchPtr = watch.extractPtr();
+				watchPtr->delref();
+				if (watchPtr->isSoleOwner()) {
+					data->watches.erase(req.key);
+					TEST(true); // Cleaned up resources for failed (timed out?) watch
+				}
 			}
 			throw;
 		}
