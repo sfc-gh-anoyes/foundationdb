@@ -1992,6 +1992,9 @@ void applyMutation( StorageServer *self, MutationRef const& m, Arena& arena, Sto
 		data.insert( m.param1, ValueOrClearToRef::value(m.param2) );
 		auto iter = self->watches.find(m.param1);
 		if (iter != self->watches.end()) {
+			// NOTE this doesn't work since we can't meaningfully read at
+			// self->data().latestVersion until all mutations for that version
+			// are applied.
 			if (iter->second->trySet(self->data().latestVersion, m.param2)) {
 				self->watches.erase(iter);
 			}
