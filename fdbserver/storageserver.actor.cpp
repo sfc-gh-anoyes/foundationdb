@@ -1050,14 +1050,19 @@ ACTOR Future<Void> getValueQ( StorageServer* data, GetValueRequest req ) {
 // (eventually) read at latestVersion to make sure we don't miss getting
 // notified.
 ACTOR Future<Void> initWatch(StorageServer* data, StorageServer::StorageWatch* watch, Key key, Optional<TagSet> tags,
-                             Optional<UID> debugID) {
+                             Optional<UID> debugID, Version reqVersion) {
 	state bool firstAttempt = true;
+	state Version minVersion = data->data().latestVersion;
 	loop {
 		try {
 			state Version version;
 			if (firstAttempt) {
 				// Optimize for case where the value has already changed
 				version = data->version.get();
+				if (version <= reqVersion) {
+					firstAttempt = false;
+					continue;
+				}
 			} else {
 				version = data->data().latestVersion;
 				wait(data->version.whenAtLeast(version));
@@ -1071,10 +1076,7 @@ ACTOR Future<Void> initWatch(StorageServer* data, StorageServer::StorageWatch* w
 			if (watch->trySet(version, reply.value)) {
 				data->watches.erase(key);
 			}
-			// If the watch becomes ready before this point it will get cancelled anyway
-			if (!firstAttempt) {
-				break;
-			}
+			if (version >= minVersion) break;
 		} catch (Error& e) {
 			if (e.code() != error_code_transaction_too_old) throw;
 		}
@@ -1131,7 +1133,10 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 		watchFuture = watch->getOnFire();
 		if (watch->getVersion() == invalidVersion) {
 			watch->init(req.version, req.value);
-			watchFuture = watchFuture || initWatch(data, watch.getPtr(), req.key, req.tags, req.debugID);
+			if (data->data().latestVersion > req.version) {
+				watchFuture =
+				    watchFuture || initWatch(data, watch.getPtr(), req.key, req.tags, req.debugID, req.version);
+			}
 		}
 		ASSERT(watchFuture.isReady() || watch->getValue() == req.value);
 
