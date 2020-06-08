@@ -1064,6 +1064,11 @@ ACTOR Future<Void> initWatch(StorageServer* data, StorageServer::StorageWatch* w
 					continue;
 				}
 			} else {
+				// Budget at least one get per watch (otherwise polling doesn't work).
+				if (data->watchBytes > SERVER_KNOBS->MAX_STORAGE_SERVER_WATCH_BYTES) {
+					TEST(true); // Too many watches, reverting to polling
+					throw watch_cancelled();
+				}
 				version = data->data().latestVersion;
 				wait(data->version.whenAtLeast(version));
 			}
@@ -1093,11 +1098,6 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 		// so we need to downgrade here
 		wait(delay(0, TaskPriority::DefaultEndpoint));
 
-		if (data->watchBytes > SERVER_KNOBS->MAX_STORAGE_SERVER_WATCH_BYTES) {
-			TEST(true); // Too many watches, reverting to polling
-			data->sendErrorWithPenalty(req.reply, watch_cancelled(), data->getPenalty());
-			return Void();
-		}
 
 		if( req.debugID.present() )
 			g_traceBatch.addEvent("WatchValueDebug", req.debugID.get().first(), "watchValueQ.Before"); //.detail("TaskID", g_network->getCurrentTask());
@@ -1163,8 +1163,7 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 		ASSERT(watch->getValue().get() != req.value);
 		req.reply.send(WatchValueReply{ watch->getVersion() });
 	} catch (Error& e) {
-		if(!canReplyWith(e))
-			throw;
+		if (!(canReplyWith(e) || e.code() == error_code_watch_cancelled)) throw;
 		data->sendErrorWithPenalty(req.reply, e, data->getPenalty());
 	}
 	return Void();
