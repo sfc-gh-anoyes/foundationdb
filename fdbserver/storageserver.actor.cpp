@@ -1068,7 +1068,7 @@ ACTOR Future<Void> initWatch(StorageServer* data, StorageServer::StorageWatch* w
 			if (reply.error.present()) {
 				throw reply.error.get();
 			}
-			if (watch->trySet(version, ErrorOr<Optional<Value>>(reply.value))) {
+			if (watch->trySet(version, reply.value)) {
 				data->watches.erase(key);
 			}
 			// If the watch becomes ready before this point it will get cancelled anyway
@@ -1111,7 +1111,7 @@ ACTOR Future<Void> watchValue_impl( StorageServer* data, WatchValueRequest req )
 			if (watch_) {
 				// Otherwise we failed to clean up a watch that was cancelled or completed
 				ASSERT(!watch_->isSoleOwner());
-				if (watch_->getVersion() >= req.version && watch_->getValue() != req.value) {
+				if (watch_->getVersion() > req.version && watch_->getValue() != req.value) {
 					// If we sent an error, then we should have already erased this
 					// key from data->watches. This should only happen if the watch
 					// was initialized from a watch request with a later version.
@@ -1988,7 +1988,7 @@ void applyMutation( StorageServer *self, MutationRef const& m, Arena& arena, Sto
 		data.insert( m.param1, ValueOrClearToRef::value(m.param2) );
 		auto iter = self->watches.find(m.param1);
 		if (iter != self->watches.end()) {
-			if (iter->second->trySet(self->data().latestVersion, ErrorOr<Optional<Value>>(m.param2))) {
+			if (iter->second->trySet(self->data().latestVersion, m.param2)) {
 				self->watches.erase(iter);
 			}
 		}
@@ -1998,7 +1998,7 @@ void applyMutation( StorageServer *self, MutationRef const& m, Arena& arena, Sto
 		ASSERT( !data.isClearContaining( data.atLatest(), m.param1 ) );
 		data.insert( m.param1, ValueOrClearToRef::clearTo(m.param2) );
 		for (auto iter = self->watches.lower_bound(m.param1); iter != self->watches.end() && iter->first < m.param2;) {
-			if (iter->second->trySet(self->data().latestVersion, ErrorOr<Optional<Value>>(m.param2))) {
+			if (iter->second->trySet(self->data().latestVersion, Optional<Value>())) {
 				iter = self->watches.erase(iter);
 			} else {
 				++iter;
@@ -2586,7 +2586,7 @@ void changeServerKeys( StorageServer* data, const KeyRangeRef& keys, bool nowAss
 			data->addShard( ShardInfo::newNotAssigned(range) );
 			for (auto iter = data->watches.lower_bound(range.begin);
 			     iter != data->watches.end() && iter->first < range.end;) {
-				if (iter->second->trySet(version, ErrorOr<Optional<Value>>{ wrong_shard_server() })) {
+				if (iter->second->trySet(version, wrong_shard_server())) {
 					iter = data->watches.erase(iter);
 				} else {
 					++iter;
