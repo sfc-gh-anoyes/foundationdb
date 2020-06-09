@@ -133,13 +133,11 @@ ACTOR static Future<Void> asyncCompare(std::string clusterFile1, std::string clu
 	}
 }
 
-namespace {
 void set_timeout(FDB::Database* db, int64_t timeout_ms) {
 	auto arg = makeString(8);
 	memcpy(mutateString(arg), &timeout_ms, 8);
 	db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_TRANSACTION_TIMEOUT, arg);
 }
-} // namespace
 
 ACTOR static Future<bool> compareKeyRange(FDB::API* fdb, std::string clusterFile1, std::string clusterFile2,
                                           FDB::Key begin, FDB::Key end, int64_t timeout_ms) {
