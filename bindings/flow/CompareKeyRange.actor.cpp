@@ -45,15 +45,13 @@ ACTOR static Future<Void> readKeyRange(Reference<FDB::Database> db, FDB::Key beg
 				if (accessSystemKeys) {
 					tr->setOption(FDBTransactionOption::FDB_TR_OPTION_ACCESS_SYSTEM_KEYS);
 				}
-				readFuture = tr->getRange(FDB::KeyRangeRef(begin, end), limit, /*snapshot*/ true);
 				everySecond = delay(1);
 			}
-			if (kvs.size() == 0) {
-				outKvs.send(Optional<FDB::KeyValue>());
-				return Never();
+			if (kvs.more) {
+				ASSERT(kvs.size() > 0);
+				begin = FDB::keyAfter(kvs.back().key);
+				readFuture = tr->getRange(FDB::KeyRangeRef(begin, end), limit, /*snapshot*/ true);
 			}
-			begin = FDB::keyAfter(kvs.back().key);
-			readFuture = tr->getRange(FDB::KeyRangeRef(begin, end), limit, /*snapshot*/ true);
 			while (*queueSize > 1e9) {
 				TraceEvent("QueueSizeTooLarge").detail("QueueSize", *queueSize);
 				wait(delay(1));
@@ -61,6 +59,10 @@ ACTOR static Future<Void> readKeyRange(Reference<FDB::Database> db, FDB::Key beg
 			for (const auto& kv : kvs) {
 				outKvs.send(Optional<FDB::KeyValue>(FDB::KeyValue(kv)));
 				*queueSize += kv.expectedSize();
+			}
+			if (!kvs.more) {
+				outKvs.send(Optional<FDB::KeyValue>());
+				return Never();
 			}
 		} catch (Error& e) {
 			TraceEvent("ReadKeyRangeError").error(e);
