@@ -21,6 +21,37 @@ THREAD_FUNC networkThread(void* api) {
 	THREAD_RETURN;
 }
 
+template <class T>
+struct Counter {
+	explicit Counter(const char* name) : name(name), value(0), timeLastLogged(g_network->now()) {}
+	void log(TraceEvent& e) {
+		if (g_network->now() > timeLastLogged) {
+			e.detail((name + std::string("Hz")).c_str(),
+			         static_cast<double>(value - valueLastLogged) / (g_network->now() - timeLastLogged));
+		}
+		e.detail(name, value);
+		timeLastLogged = g_network->now();
+		valueLastLogged = value;
+	}
+	void add(T v) { value += v; }
+
+	T getValue() const { return value; }
+	T getValueLastLogged() const { return valueLastLogged; }
+	double getTimeLastLogged() const { return timeLastLogged; }
+
+private:
+	const char* name;
+	T value = 0;
+	T valueLastLogged = 0;
+	double timeLastLogged = 0;
+};
+
+Counter<int64_t> bytesCompared("BytesCompared");
+Counter<int64_t> futureVersions("FutureVersions");
+Counter<int64_t> transactionsTooOld("TransactionsTooOld");
+Counter<int64_t> transactionRetries("TransactionsRetries");
+Counter<int64_t> successfulReads("SuccessfulReads");
+
 ACTOR static Future<Void> readKeyRange(Reference<FDB::Database> db, FDB::Key begin, FDB::Key end,
                                        PromiseStream<Optional<FDB::KeyValue>> outKvs, int64_t* queueSize,
                                        bool accessSystemKeys = false) {
@@ -38,6 +69,7 @@ ACTOR static Future<Void> readKeyRange(Reference<FDB::Database> db, FDB::Key beg
 	loop {
 		try {
 			state FDB::FDBStandalone<FDB::RangeResultRef> kvs = wait(readFuture);
+			successfulReads.add(1);
 			if (everySecond.isReady()) {
 				tr->reset();
 				tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_YOUR_WRITES_DISABLE);
@@ -66,7 +98,10 @@ ACTOR static Future<Void> readKeyRange(Reference<FDB::Database> db, FDB::Key beg
 			}
 		} catch (Error& e) {
 			TraceEvent("ReadKeyRangeError").error(e);
+			if (e.code() == error_code_transaction_too_old) transactionsTooOld.add(1);
+			if (e.code() == error_code_future_version) futureVersions.add(1);
 			wait(tr->onError(e));
+			transactionRetries.add(1);
 			tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_YOUR_WRITES_DISABLE);
 			tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_LOCK_AWARE);
 			if (accessSystemKeys) {
@@ -81,10 +116,6 @@ ACTOR static Future<Void> asyncCompare(std::string clusterFile1, std::string clu
                                        FutureStream<Optional<FDB::KeyValue>> kvs1,
                                        FutureStream<Optional<FDB::KeyValue>> kvs2, bool* compareSuccess,
                                        int64_t* queueSize1, int64_t* queueSize2) {
-	state int64_t bytesCompared = 0;
-	state int64_t lastBytesCompared = 0;
-	state double lastLogged = g_network->now();
-	state Future<Void> logFuture = delay(1);
 	loop {
 		state Optional<FDB::KeyValue> kv1 = waitNext(kvs1);
 		*queueSize1 -= kv1.present() ? kv1.get().expectedSize() : 0;
@@ -121,15 +152,7 @@ ACTOR static Future<Void> asyncCompare(std::string clusterFile1, std::string clu
 		if (!kv1.present() && !kv2.present()) {
 			return Void();
 		}
-		bytesCompared += kv1.get().key.size() + kv1.get().value.size();
-		if (logFuture.isReady()) {
-			logFuture = delay(1);
-			if (g_network->now() - lastLogged > 0) {
-				printf("Bytes/s: %f\n", double(bytesCompared - lastBytesCompared) / (g_network->now() - lastLogged));
-			}
-			lastLogged = g_network->now();
-			lastBytesCompared = bytesCompared;
-		}
+		bytesCompared.add(kv1.get().key.size() + kv1.get().value.size());
 	}
 }
 
@@ -153,6 +176,22 @@ ACTOR static Future<bool> compareKeyRange(FDB::API* fdb, std::string clusterFile
 	choose {
 		when(wait(readKeyRange(db1, begin, end, kvs1, &queueSize1))) { ASSERT(false); }
 		when(wait(readKeyRange(db2, begin, end, kvs2, &queueSize2))) { ASSERT(false); }
+		when(wait(recurring(
+		    []() {
+			    TraceEvent te("CompareKeyRangeMetrics");
+			    if (g_network->now() - bytesCompared.getTimeLastLogged() > 0) {
+				    printf("Bytes/s: %f\n", double(bytesCompared.getValue() - bytesCompared.getValueLastLogged()) /
+				                                (g_network->now() - bytesCompared.getTimeLastLogged()));
+			    }
+			    bytesCompared.log(te);
+			    futureVersions.log(te);
+			    transactionsTooOld.log(te);
+			    transactionRetries.log(te);
+			    successfulReads.log(te);
+		    },
+		    1))) {
+			ASSERT(false);
+		}
 		when(wait(asyncCompare(clusterFile1, clusterFile2, kvs1.getFuture(), kvs2.getFuture(), &compareSuccess,
 		                       &queueSize1, &queueSize2))) {}
 	}
