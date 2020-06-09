@@ -246,6 +246,7 @@ ACTOR Future<bool> genMakefileActor(FDB::API* fdb, std::string clusterFile1, std
 		}
 		when(wait(collectRanges(&ranges, kvs1.getFuture(), &queueSize1))) {}
 	}
+	deterministicRandom()->randomShuffle(ranges);
 	std::string uid = deterministicRandom()->randomUniqueID().toString();
 	std::ofstream out;
 	auto outFileName = format("compare_%s.mk", uid.c_str());
