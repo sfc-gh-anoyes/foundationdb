@@ -1,6 +1,7 @@
 #include <algorithm>
-#include <iostream>
+#include <boost/lexical_cast.hpp>
 #include <fstream>
+#include <iostream>
 
 #include "Arena.h"
 #include "FDBLoanerTypes.h"
@@ -130,16 +131,28 @@ ACTOR static Future<Void> asyncCompare(std::string clusterFile1, std::string clu
 	}
 }
 
+namespace {
+void set_timeout(FDB::Database* db, int64_t timeout_ms) {
+	auto arg = makeString(8);
+	memcpy(mutateString(arg), &timeout_ms, 8);
+	db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_TRANSACTION_TIMEOUT, arg);
+}
+} // namespace
+
 ACTOR static Future<bool> compareKeyRange(FDB::API* fdb, std::string clusterFile1, std::string clusterFile2,
-                                          FDB::Key begin, FDB::Key end) {
+                                          FDB::Key begin, FDB::Key end, int64_t timeout_ms) {
 	state bool compareSuccess = true;
-	PromiseStream<Optional<FDB::KeyValue>> kvs1;
+	state PromiseStream<Optional<FDB::KeyValue>> kvs1;
 	state int64_t queueSize1 = 0;
-	PromiseStream<Optional<FDB::KeyValue>> kvs2;
+	state PromiseStream<Optional<FDB::KeyValue>> kvs2;
 	state int64_t queueSize2 = 0;
+	state Reference<FDB::Database> db1 = fdb->createDatabase(clusterFile1);
+	set_timeout(db1.getPtr(), timeout_ms);
+	state Reference<FDB::Database> db2 = fdb->createDatabase(clusterFile2);
+	set_timeout(db2.getPtr(), timeout_ms);
 	choose {
-		when(wait(readKeyRange(fdb->createDatabase(clusterFile1), begin, end, kvs1, &queueSize1))) { ASSERT(false); }
-		when(wait(readKeyRange(fdb->createDatabase(clusterFile2), begin, end, kvs2, &queueSize2))) { ASSERT(false); }
+		when(wait(readKeyRange(db1, begin, end, kvs1, &queueSize1))) { ASSERT(false); }
+		when(wait(readKeyRange(db2, begin, end, kvs2, &queueSize2))) { ASSERT(false); }
 		when(wait(asyncCompare(clusterFile1, clusterFile2, kvs1.getFuture(), kvs2.getFuture(), &compareSuccess,
 		                       &queueSize1, &queueSize2))) {}
 	}
@@ -218,13 +231,16 @@ ACTOR Future<Void> collectRanges(Standalone<VectorRef<std::pair<StringRef, Strin
 	return Void();
 }
 
-ACTOR Future<bool> genMakefileActor(FDB::API* fdb, std::string clusterFile1, std::string clusterFile2) {
-	PromiseStream<Optional<FDB::KeyValue>> kvs1;
+ACTOR Future<bool> genMakefileActor(FDB::API* fdb, std::string clusterFile1, std::string clusterFile2,
+                                    int64_t timeout_ms) {
+	state PromiseStream<Optional<FDB::KeyValue>> kvs1;
 	state int64_t queueSize1 = 0;
 	state Standalone<VectorRef<std::pair<StringRef, StringRef>>> ranges;
+	state Reference<FDB::Database> db = fdb->createDatabase(clusterFile1);
+	set_timeout(db.getPtr(), timeout_ms);
 	choose {
-		when(wait(readKeyRange(fdb->createDatabase(clusterFile1), LiteralStringRef("\xff/keyServers/\x00"),
-		                       LiteralStringRef("\xff/keyServers/\xff"), kvs1, &queueSize1,
+		when(wait(readKeyRange(db, LiteralStringRef("\xff/keyServers/\x00"), LiteralStringRef("\xff/keyServers/\xff"),
+		                       kvs1, &queueSize1,
 		                       /*accessSystemKeys*/ true))) {
 			ASSERT(false);
 		}
@@ -305,11 +321,15 @@ Usage:
 %s --version
   Show the source version this binary was built from and exit
 
-%s --gen <cluster_file1> <cluster_file2>
+%s [OPTIONS] --gen <cluster_file1> <cluster_file2>
   Generate a Makefile to parallelize compare_key_range calls
 
-%s <cluster_file1> <cluster_file2> <begin> <end>
+%s [OPTIONS] <cluster_file1> <cluster_file2> <begin> <end>
   Compare the contents of db's at <cluster_file1> and <cluster_file2> for key range <begin> to <end>
+
+OPTIONS:
+  --timeout_ms <timeout_ms>
+    All transactions will be given a timeout of <timeout_ms>. Default is 60000 ms.
 )"";
 
 void printUsage(FILE* f, const char* program_name) {
@@ -323,10 +343,25 @@ int main(int argc, char** argv) {
 		bool help = false;
 		bool version = false;
 		bool gen = false;
+		int64_t timeout_ms = 60000;
+		std::vector<std::string> positional_args;
 		for (int i = 1; i < argc; ++i) {
-			if (std::string_view{ argv[i] } == "--help") help = true;
-			if (std::string_view{ argv[i] } == "--version") version = true;
-			if (std::string_view{ argv[i] } == "--gen") gen = true;
+			if (std::string_view{ argv[i] } == "--help") {
+				help = true;
+			} else if (std::string_view{ argv[i] } == "--version") {
+				version = true;
+			} else if (std::string_view{ argv[i] } == "--gen") {
+				gen = true;
+			} else if (std::string_view{ argv[i] } == "--timeout_ms") {
+				if (i + 1 >= argc) {
+					printUsage(stdout, argv[0]);
+					flushAndExit(FDB_EXIT_ERROR);
+				}
+				++i;
+				timeout_ms = boost::lexical_cast<int64_t>(argv[i]);
+			} else {
+				positional_args.push_back(argv[i]);
+			}
 		}
 		if (help) {
 			printUsage(stdout, argv[0]);
@@ -337,19 +372,22 @@ int main(int argc, char** argv) {
 			flushAndExit(FDB_EXIT_SUCCESS);
 		}
 		if (gen) {
-			if (argc != 4 || std::string_view(argv[1]) != "--gen") {
+			if (positional_args.size() != 2) {
 				printUsage(stderr, argv[0]);
 				flushAndExit(FDB_EXIT_ERROR);
 			}
-			mainActor([argv](FDB::API* fdb) { return genMakefileActor(fdb, argv[2], argv[3]); });
+			mainActor([=](FDB::API* fdb) {
+				return genMakefileActor(fdb, positional_args[0], positional_args[1], timeout_ms);
+			});
 		} else {
-			if (argc != 5) {
+			if (positional_args.size() != 4) {
 				printUsage(stderr, argv[0]);
 				flushAndExit(FDB_EXIT_ERROR);
 			}
-			mainActor([argv](FDB::API* fdb) {
-				return compareKeyRange(fdb, argv[1], argv[2], FDB::Key(fromPrintable(argv[3])),
-				                       FDB::Key(fromPrintable(argv[4])));
+			mainActor([=](FDB::API* fdb) {
+				return compareKeyRange(fdb, positional_args[0], positional_args[1],
+				                       FDB::Key(fromPrintable(positional_args[2])),
+				                       FDB::Key(fromPrintable(positional_args[3])), timeout_ms);
 			});
 		}
 		g_network->run();
