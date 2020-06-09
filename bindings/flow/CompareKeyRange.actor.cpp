@@ -23,7 +23,7 @@ THREAD_FUNC networkThread(void* api) {
 
 template <class T>
 struct Counter {
-	explicit Counter(const char* name) : name(name), value(0), timeLastLogged(g_network->now()) {}
+	explicit Counter(const char* name) : name(name), value(0), timeLastLogged(std::numeric_limits<double>::max()) {}
 	void log(TraceEvent& e) {
 		if (g_network->now() > timeLastLogged) {
 			e.detail((name + std::string("Hz")).c_str(),
