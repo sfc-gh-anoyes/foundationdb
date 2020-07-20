@@ -27,6 +27,7 @@
 #include "fdbserver/LogSystem.h"
 #include "fdbserver/LogProtocolMessage.h"
 
+#include "flow/UnitTest.h"
 
 Reference<StorageInfo> getStorageInfo(UID id, std::map<UID, Reference<StorageInfo>>* storageCache, IKeyValueStore* txnStateStore) {
 	Reference<StorageInfo> storageInfo;
@@ -45,9 +46,14 @@ Reference<StorageInfo> getStorageInfo(UID id, std::map<UID, Reference<StorageInf
 // It is incredibly important that any modifications to txnStateStore are done in such a way that
 // the same operations will be done on all proxies at the same time. Otherwise, the data stored in
 // txnStateStore will become corrupted.
-void applyMetadataMutations(UID const& dbgid, Arena &arena, VectorRef<MutationRef> const& mutations, IKeyValueStore* txnStateStore, LogPushData* toCommit, bool *confChange, Reference<ILogSystem> logSystem, Version popVersion,
-	KeyRangeMap<std::set<Key> >* vecBackupKeys, KeyRangeMap<ServerCacheInfo>* keyInfo, std::map<Key, applyMutationsData>* uid_applyMutationsData, RequestStream<CommitTransactionRequest> commit,
-	Database cx, NotifiedVersion* commitVersion, std::map<UID, Reference<StorageInfo>>* storageCache, std::map<Tag, Version>* tag_popped, bool initialCommit ) {
+void applyMetadataMutations(UID const& dbgid, Arena& arena, VectorRef<MutationRef> const& mutations,
+                            IKeyValueStore* txnStateStore, LogPushData* toCommit, bool* confChange,
+                            Reference<ILogSystem> logSystem, Version popVersion,
+                            KeyRangeMap<std::set<Key>>* vecBackupKeys, KeyRangeMap<ServerCacheInfo>* keyInfo,
+                            std::map<Key, applyMutationsData>* uid_applyMutationsData,
+                            RequestStream<CommitTransactionRequest> commit, Database cx, NotifiedVersion* commitVersion,
+                            std::map<UID, Reference<StorageInfo>>* storageCache, std::map<Tag, Version>* tag_popped,
+                            bool initialCommit, AllocatedPrefixes* allocatedPrefixes) {
 	for (auto const& m : mutations) {
 		//TraceEvent("MetadataMutation", dbgid).detail("M", m.toString());
 
@@ -431,6 +437,35 @@ void applyMetadataMutations(UID const& dbgid, Arena &arena, VectorRef<MutationRe
 
 				if(!initialCommit) txnStateStore->clear(commonLogRange);
 			}
+		} else if (m.param1.size() && m.param1[0] == uint8_t('\xfe') && m.type == MutationRef::SetValue) {
+			if (allocatedPrefixes) {
+				allocatedPrefixes->add(m.param2);
+			}
+			txnStateStore->set(KeyValueRef(m.param1, m.param2));
+		} else if (m.param2.size() && m.param2[0] == uint8_t('\xfe') && m.type == MutationRef::ClearRange) {
+			if (allocatedPrefixes) {
+				auto allPrefixes = txnStateStore->readRange(KeyRangeRef(m.param1, m.param2)).get();
+				for (const auto& [_, v] : allPrefixes) {
+					allocatedPrefixes->clear(v);
+				}
+			}
+			txnStateStore->clear(KeyRangeRef(m.param1, m.param2));
 		}
 	}
+}
+
+TEST_CASE("/fdbserver/allocatedPrefixes") {
+	AllocatedPrefixes prefixes;
+	prefixes.add(LiteralStringRef("fair"));
+	prefixes.add(LiteralStringRef("fold"));
+	prefixes.add(LiteralStringRef("food"));
+	prefixes.add(LiteralStringRef("brood"));
+	ASSERT(prefixes.startsWithAllocatedPrefix(LiteralStringRef("fair")));
+	ASSERT(prefixes.startsWithAllocatedPrefix(LiteralStringRef("fairness")));
+	prefixes.clear(LiteralStringRef("fair"));
+	ASSERT(!prefixes.startsWithAllocatedPrefix(LiteralStringRef("fairness")));
+	for (const auto& prefix : prefixes.allocatedPrefixes()) {
+		printf("%s\n", prefix.c_str());
+	}
+	return Void();
 }

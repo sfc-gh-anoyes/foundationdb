@@ -217,6 +217,7 @@ struct ProxyCommitData {
 	LogSystemDiskQueueAdapter* logAdapter;
 	Reference<ILogSystem> logSystem;
 	IKeyValueStore* txnStateStore;
+	AllocatedPrefixes allocatedPrefixes;
 	NotifiedVersion committedVersion; // Provided that this recovery has succeeded or will succeed, this version is fully committed (durable)
 	Version minKnownCommittedVersion; // No version smaller than this one will be used as the known committed version during recovery 
 	Version version;  // The version at which txnStateStore is up to date
@@ -653,8 +654,13 @@ ACTOR Future<Void> commitBatch(
 			for (int resolver = 0; resolver < resolution.size(); resolver++)
 				committed = committed && resolution[resolver].stateMutations[versionIndex][transactionIndex].committed;
 			if (committed)
-				applyMetadataMutations( self->dbgid, arena, resolution[0].stateMutations[versionIndex][transactionIndex].mutations, self->txnStateStore, NULL, &forceRecovery, self->logSystem, 0, &self->vecBackupKeys, &self->keyInfo, self->firstProxy ? &self->uid_applyMutationsData : NULL, self->commit, self->cx, &self->committedVersion, &self->storageCache, &self->tag_popped);
-			
+				applyMetadataMutations(
+				    self->dbgid, arena, resolution[0].stateMutations[versionIndex][transactionIndex].mutations,
+				    self->txnStateStore, NULL, &forceRecovery, self->logSystem, 0, &self->vecBackupKeys, &self->keyInfo,
+				    self->firstProxy ? &self->uid_applyMutationsData : NULL, self->commit, self->cx,
+				    &self->committedVersion, &self->storageCache, &self->tag_popped, /*initialCommit*/ false,
+				    &self->allocatedPrefixes);
+
 			if( resolution[0].stateMutations[versionIndex][transactionIndex].mutations.size() && firstStateMutations ) {
 				ASSERT(committed);
 				firstStateMutations = false;
@@ -805,6 +811,12 @@ ACTOR Future<Void> commitBatch(
 						self->singleKeyMutationEvent->shardBegin = shard.begin;
 						self->singleKeyMutationEvent->shardEnd = shard.end;
 						self->singleKeyMutationEvent->log();
+					}
+
+					if (!((m.param1.size() > 0 && m.param1[0] >= uint8_t('\xfe')) ||
+					      self->allocatedPrefixes.startsWithAllocatedPrefix(m.param1))) {
+						TraceEvent(SevError, "WriteToKeyNotAllocatedByDirectoryLayer")
+						    .detail("Key", m.param1.printable());
 					}
 
 					if (debugMutation("ProxyCommit", commitVersion, m))
@@ -1838,7 +1850,12 @@ ACTOR Future<Void> masterProxyServerCore(
 
 						Arena arena;
 						bool confChanges;
-						applyMetadataMutations(commitData.dbgid, arena, mutations, commitData.txnStateStore, NULL, &confChanges, Reference<ILogSystem>(), 0, &commitData.vecBackupKeys, &commitData.keyInfo, commitData.firstProxy ? &commitData.uid_applyMutationsData : NULL, commitData.commit, commitData.cx, &commitData.committedVersion, &commitData.storageCache, &commitData.tag_popped, true );
+						applyMetadataMutations(
+						    commitData.dbgid, arena, mutations, commitData.txnStateStore, NULL, &confChanges,
+						    Reference<ILogSystem>(), 0, &commitData.vecBackupKeys, &commitData.keyInfo,
+						    commitData.firstProxy ? &commitData.uid_applyMutationsData : NULL, commitData.commit,
+						    commitData.cx, &commitData.committedVersion, &commitData.storageCache,
+						    &commitData.tag_popped, true, &commitData.allocatedPrefixes);
 					}
 
 					auto lockedKey = commitData.txnStateStore->readValue(databaseLockedKey).get();

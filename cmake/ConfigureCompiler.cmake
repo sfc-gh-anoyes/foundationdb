@@ -243,7 +243,7 @@ else()
   endif()
   if (CMAKE_GENERATOR STREQUAL Xcode)
   else()
-    add_compile_options(-Werror)
+    # add_compile_options(-Werror)
   endif()
   add_compile_options($<$<BOOL:${GCC}>:-Wno-pragmas>)
   add_compile_options(-Wno-error=format
