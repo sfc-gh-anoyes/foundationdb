@@ -2263,9 +2263,16 @@ ACTOR Future<Void> masterProxyServerCore(
 	}
 }
 
-ACTOR Future<Void> checkRemoved(Reference<AsyncVar<ServerDBInfo>> db, uint64_t recoveryCount, MasterProxyInterface myInterface) {
-	loop{
-		if (db->get().recoveryCount >= recoveryCount && !std::count(db->get().client.proxies.begin(), db->get().client.proxies.end(), myInterface)) {
+ACTOR Future<Void> checkRemoved(Reference<AsyncVar<ServerDBInfo>> db, uint64_t recoveryCount,
+                                MasterProxyInterface myInterface) {
+	loop {
+		if (db->get().recoveryCount >= recoveryCount && db->get().recoveryState == RecoveryState::FULLY_RECOVERED &&
+		    !std::count(db->get().client.proxies.begin(), db->get().client.proxies.end(), myInterface)) {
+			TraceEvent("MasterProxyDisplaced", myInterface.id())
+			    .detail("DbRecoveryCount", db->get().recoveryCount)
+			    .detail("DbRecoveryState", db->get().recoveryState)
+			    .detail("RecoveryCount", recoveryCount)
+			    .detail("Proxies", db->get().client.proxies.size());
 			throw worker_removed();
 		}
 		wait(db->onChange());
